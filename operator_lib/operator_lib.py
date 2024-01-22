@@ -53,7 +53,7 @@ class OperatorLib:
             output_topic=dep_config.output,
             pipeline_id=dep_config.pipeline_id,
             operator_id=dep_config.operator_id,
-            config=operator.configType(json.loads(dep_config.config).config)
+            config=operator.configType(json.loads(dep_config.config)['config'])
         )
         watchdog = cncr_wdg.Watchdog(
             monitor_callables=[operator.is_alive],
