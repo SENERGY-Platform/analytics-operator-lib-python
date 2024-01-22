@@ -25,7 +25,8 @@ class OperatorLib:
     def __init__(self, operator: util.OperatorBase, name: str = "OperatorLib", git_info_file="git_commit"):
         util.print_init(name=name, git_info_file=git_info_file)
         dep_config = util.DeploymentConfig()
-        opr_config = util.OperatorConfig(json.loads(dep_config.config))
+        config_json = json.loads(dep_config.config)
+        opr_config = util.OperatorConfig(config_json)
         util.init_logger(opr_config.config.logger_level)
         util.logger.debug(f"deployment config: {dep_config}")
         util.logger.debug(f"operator config: {opr_config}")
@@ -46,6 +47,9 @@ class OperatorLib:
         util.logger.debug(f"kafka producer config: {kafka_producer_config}")
         kafka_consumer = confluent_kafka.Consumer(kafka_consumer_config, logger=util.logger)
         kafka_producer = confluent_kafka.Producer(kafka_producer_config, logger=util.logger)
+        typed_config = operator.configType({})
+        if "config" in config_json:
+            typed_config = operator.configType(config_json['config'])
         operator.init(
             kafka_consumer=kafka_consumer,
             kafka_producer=kafka_producer,
@@ -53,7 +57,7 @@ class OperatorLib:
             output_topic=dep_config.output,
             pipeline_id=dep_config.pipeline_id,
             operator_id=dep_config.operator_id,
-            config=operator.configType(json.loads(dep_config.config)['config'])
+            config=typed_config
         )
         watchdog = cncr_wdg.Watchdog(
             monitor_callables=[operator.is_alive],
