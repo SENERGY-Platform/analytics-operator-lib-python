@@ -14,7 +14,7 @@
    limitations under the License.
 """
 
-__all__ = ("OperatorConfig", "Config", )
+__all__ = ("OperatorConfig", "Config", "Selector")
 
 import simple_struct
 import json
