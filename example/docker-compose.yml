@@ -1,0 +1,17 @@
+version: "2"
+
+services:
+  kafka:
+    image: docker.io/lensesio/fast-data-dev
+    network_mode: host # this is naughty, but kafka is very picky
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --list --bootstrap-server 127.0.0.1:9092"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+  operator:
+    build: .
+    network_mode: host # this is naughty, but kafka is very picky
+    depends_on:
+      kafka:
+        condition: service_healthy
