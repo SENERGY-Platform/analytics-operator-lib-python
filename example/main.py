@@ -35,10 +35,15 @@ class Operator(OperatorBase):
         Selector({"name": "selector1", "args": ["value"]})
     ]
 
+    # do any setup in this method and always call super!
+    # your config is already populated here
+    def init(self, *args, **kwargs):
+        super().init(*args, **kwargs)
+        print(f"got configured with {self.config.myconfig}")
+
     # you need to implement this method
     # based on the selector you may call other methods
     def run(self, data: typing.Dict[str, typing.Any], selector: str):
-        print(f"o got configured with {self.config.myconfig}")
         print(f"{selector} {data}")
         if data['value'] == 5:
             print('reached the end of sample data, everything seems to be working fine. Stop the operator with CTRL+C')
