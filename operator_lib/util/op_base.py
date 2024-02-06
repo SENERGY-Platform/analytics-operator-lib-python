@@ -74,7 +74,10 @@ class OperatorBase:
                             data=result.data
                         )
                         if run_result is not None:
-                            run_results.append(run_result)
+                            if isinstance(run_result, list):
+                                run_results += run_result
+                            else:
+                                run_results.append(run_result)
                 else:
                     logger.error(result.ex)
         except mf_lib.exceptions.NoFilterError:
@@ -105,12 +108,27 @@ class OperatorBase:
                 raise confluent_kafka.KafkaException(msg_obj.error())
 
     def __loop(self):
+        q = 0
+        i = 0
         while not self.__stop:
             try:
                 self.__route()
             except Exception as ex:
                 logger.exception(ex)
                 self.__stop = True
+            if len(self.__kafka_producer) > 0:
+                if q == len(self.__kafka_producer):
+                    i = i+1
+                else: 
+                    i = 0
+                    q = len(self.__kafka_producer)
+                if q > 10 or i == 3: # 10 msgs queued or waited for 3 cycles without new msgs
+                    self.__kafka_producer.flush()
+                    i = 0
+                    q = 0
+            else:
+                q = 0
+                i = 0
         self.__stopped = True
 
     def init(self, kafka_consumer: confluent_kafka.Consumer, kafka_producer: confluent_kafka.Producer, filter_handler: mf_lib.FilterHandler, output_topic: str, pipeline_id: str, operator_id: str, poll_timeout: float = 1.0, config: Config = Config({})):
