@@ -46,7 +46,8 @@ setuptools.setup(
         'simple-struct @ git+https://github.com/y-du/simple-struct.git@0.2.0',
         'concurrency-watchdog @ git+https://github.com/SENERGY-Platform/concurrency-watchdog.git@0.1.1',
         'confluent_kafka<2',
-        'kazoo<3'
+        'kazoo<3',
+        'prometheus-client<1'
     ],
     packages=setuptools.find_packages(),
     python_requires='>=3.5.3',

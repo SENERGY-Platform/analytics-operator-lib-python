@@ -30,4 +30,5 @@ class DeploymentConfig(sevm.Config):
     device_id_path = None
     window_time = None
     zk_brokers_path = "/brokers/ids"
+    metrics = False
 
