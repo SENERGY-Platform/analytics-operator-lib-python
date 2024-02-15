@@ -47,9 +47,9 @@ class OperatorLib:
         if dep_config.metrics:
             metrics_port = 5555
             util.logger.info(f"Launching with metrics server on port {metrics_port}")
-            kafka_consumer_config["statistics.interval.ms"] = 1000 # TODO
+            kafka_consumer_config["statistics.interval.ms"] = 30000
             kafka_consumer_config["stats_cb"] = self.__consumer_stats
-            kafka_producer_config["statistics.interval.ms"] = 1000 # TODO
+            kafka_producer_config["statistics.interval.ms"] = 30000
             kafka_producer_config["stats_cb"] = self.__producer_stats
             self.__kafka_consumer_consumer_fetch_manager_metrics_records_consumed_total = prometheus_client.Gauge('kafka_consumer_consumer_fetch_manager_metrics_records_consumed_total', 'The total number of records consumed kafka.consumer:name=null,type=consumer-fetch-manager-metrics,attribute=records-consumed-total', ['client_id', 'topic'])
             self.__kafka_consumer_consumer_fetch_manager_metrics_bytes_consumed_total = prometheus_client.Gauge('kafka_consumer_consumer_fetch_manager_metrics_bytes_consumed_total', 'The total number of bytes consumed kafka.consumer:name=null,type=consumer-fetch-manager-metrics,attribute=bytes-consumed-total', ['client_id', 'topic'])
