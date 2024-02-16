@@ -45,8 +45,7 @@ class OperatorLib:
             "metadata.broker.list": kafka_brokers,
         }
         if dep_config.metrics:
-            metrics_port = 5555
-            util.logger.info(f"Launching with metrics server on port {metrics_port}")
+            util.logger.info(f"Launching with metrics server on port {dep_config.metrics_port}")
             kafka_consumer_config["statistics.interval.ms"] = 30000
             kafka_consumer_config["stats_cb"] = self.__consumer_stats
             kafka_producer_config["statistics.interval.ms"] = 30000
@@ -55,7 +54,7 @@ class OperatorLib:
             self.__kafka_consumer_consumer_fetch_manager_metrics_bytes_consumed_total = prometheus_client.Gauge('kafka_consumer_consumer_fetch_manager_metrics_bytes_consumed_total', 'The total number of bytes consumed kafka.consumer:name=null,type=consumer-fetch-manager-metrics,attribute=bytes-consumed-total', ['client_id', 'topic'])
             self.__kafka_producer_producer_topic_metrics_record_send_total = prometheus_client.Gauge('kafka_producer_producer_metrics_record_send_total', 'The total number of records sent. kafka.producer:name=null,type=producer-metrics,attribute=record-send-total', ['client_id'])
             self.__kafka_producer_producer_topic_metrics_byte_total = prometheus_client.Gauge('kafka_producer_producer_topic_metrics_byte_total', 'The total number of bytes sent for a topic. kafka.producer:name=null,type=producer-topic-metrics,attribute=byte-total', ['client_id', 'topic'])
-            prometheus_client.start_http_server(metrics_port)
+            prometheus_client.start_http_server(dep_config.metrics_port)
 
         util.logger.debug(f"kafka consumer config: {kafka_consumer_config}")
         util.logger.debug(f"kafka producer config: {kafka_producer_config}")

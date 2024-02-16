@@ -31,4 +31,5 @@ class DeploymentConfig(sevm.Config):
     window_time = None
     zk_brokers_path = "/brokers/ids"
     metrics = False
+    metrics_port = 5555
 
