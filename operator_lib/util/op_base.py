@@ -80,6 +80,8 @@ class OperatorBase:
                                 run_results.append(run_result)
                 else:
                     logger.error(result.ex)
+                    self.__handle_result_error(result.ex)
+
         except mf_lib.exceptions.NoFilterError:
             pass
         except mf_lib.exceptions.MessageIdentificationError as ex:
@@ -131,7 +133,18 @@ class OperatorBase:
                 i = 0
         self.__stopped = True
 
-    def init(self, kafka_consumer: confluent_kafka.Consumer, kafka_producer: confluent_kafka.Producer, filter_handler: mf_lib.FilterHandler, output_topic: str, pipeline_id: str, operator_id: str, poll_timeout: float = 1.0, config: Config = Config({})):
+    def init(
+        self, 
+        kafka_consumer: confluent_kafka.Consumer, 
+        kafka_producer: confluent_kafka.Producer, 
+        filter_handler: mf_lib.FilterHandler, 
+        output_topic: str, 
+        pipeline_id: str, 
+        operator_id: str, 
+        poll_timeout: float = 1.0, 
+        config: Config = Config({}),
+        result_error_handler = None
+    ):
         self.__kafka_consumer = kafka_consumer
         self.__kafka_producer = kafka_producer
         self.__filter_handler = filter_handler
@@ -139,6 +152,7 @@ class OperatorBase:
         self.__pipeline_id = pipeline_id
         self.__operator_id = operator_id
         self.__poll_timeout = poll_timeout
+        self.__handle_result_error = result_error_handler
         self.config = config
 
     def get_pipeline_id(self) -> str:
@@ -165,6 +179,18 @@ class OperatorBase:
 
     def is_alive(self) -> bool:
         return not self.__stopped
+
+    def produce(self, value):
+        self.__kafka_producer.produce(
+            self.__output_topic,
+            json.dumps({
+                "pipeline_id": self.__pipeline_id,
+                "operator_id": self.__operator_id,
+                "analytics": value,
+                "time": "{}Z".format(datetime.datetime.utcnow().isoformat())
+            }),
+            self.__operator_id
+        )
 
     def run(self, data: typing.Dict[str, typing.Any], selector: str):
         """

@@ -21,8 +21,15 @@ import mf_lib
 import cncr_wdg
 import signal
 import prometheus_client 
+
 class OperatorLib:
-    def __init__(self, operator: util.OperatorBase, name: str = "OperatorLib", git_info_file="git_commit"):
+    def __init__(
+        self, 
+        operator: util.OperatorBase, 
+        name: str = "OperatorLib", 
+        git_info_file="git_commit",
+        result_error_handler=None
+    ):
         util.print_init(name=name, git_info_file=git_info_file)
         dep_config = util.DeploymentConfig()
         self.__dep_config = dep_config
@@ -70,7 +77,8 @@ class OperatorLib:
             output_topic=dep_config.output,
             pipeline_id=dep_config.pipeline_id,
             operator_id=dep_config.operator_id,
-            config=typed_config
+            config=typed_config,
+            result_error_handler=result_error_handler
         )
         watchdog = cncr_wdg.Watchdog(
             monitor_callables=[operator.is_alive],
