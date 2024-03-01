@@ -63,7 +63,7 @@ class OperatorBase:
         setattr(obj, f"_{OperatorBase.__name__}__stopped", False)
         return obj
 
-    def __call_run(self, message):
+    def __call_run(self, message, topic):
         run_results = list()
         try:
             for result in self.__filter_handler.get_results(message=message):
@@ -71,7 +71,8 @@ class OperatorBase:
                     for f_id in result.filter_ids:
                         run_result = self.run(
                             selector=self.__filter_handler.get_filter_args(id=f_id)["selector"],
-                            data=result.data
+                            data=result.data,
+                            topic=topic
                         )
                         if run_result is not None:
                             if isinstance(run_result, list):
@@ -92,7 +93,7 @@ class OperatorBase:
         msg_obj = self.__kafka_consumer.poll(timeout=self.__poll_timeout)
         if msg_obj:
             if not msg_obj.error():
-                results = self.__call_run(json.loads(msg_obj.value()))
+                results = self.__call_run(json.loads(msg_obj.value()), msg_obj.topic())
                 for result in results:
                     self.__kafka_producer.produce(
                         self.__output_topic,
