@@ -193,7 +193,7 @@ class OperatorBase:
             self.__operator_id
         )
 
-    def run(self, data: typing.Dict[str, typing.Any], selector: str):
+    def run(self, data: typing.Dict[str, typing.Any], selector: str, topic: str):
         """
         Subclasses must override this method.
         :param data: Dictionary containing data extracted from a message.
