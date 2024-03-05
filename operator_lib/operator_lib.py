@@ -17,7 +17,6 @@
 import operator_lib.util as util
 import json
 import confluent_kafka
-import mf_lib
 import cncr_wdg
 import signal
 import prometheus_client 
@@ -38,11 +37,8 @@ class OperatorLib:
         util.init_logger(opr_config.config.logger_level)
         util.logger.debug(f"deployment config: {dep_config}")
         util.logger.debug(f"operator config: {opr_config}")
-        filter_handler = mf_lib.FilterHandler()
-        for it in opr_config.inputTopics:
-            msg_filter = util.gen_filter(input_topic=it, selectors=operator.selectors, pipeline_id=dep_config.pipeline_id)
-            util.logger.debug(f"Added filter: {msg_filter}")
-            filter_handler.add_filter(msg_filter)
+        filter_handler = util.create_filter_handler(opr_config.inputTopics, dep_config.pipeline_id, operator.selectors)
+
         kafka_brokers = ",".join(util.get_kafka_brokers(zk_hosts=dep_config.zk_quorum, zk_path=dep_config.zk_brokers_path))
         kafka_consumer_config = {
             "metadata.broker.list": kafka_brokers,
