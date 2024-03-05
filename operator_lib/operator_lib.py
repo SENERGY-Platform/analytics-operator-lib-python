@@ -40,7 +40,9 @@ class OperatorLib:
         util.logger.debug(f"operator config: {opr_config}")
         filter_handler = mf_lib.FilterHandler()
         for it in opr_config.inputTopics:
-            filter_handler.add_filter(util.gen_filter(input_topic=it, selectors=operator.selectors, pipeline_id=dep_config.pipeline_id))
+            msg_filter = util.gen_filter(input_topic=it, selectors=operator.selectors, pipeline_id=dep_config.pipeline_id)
+            util.logger.debug(f"Added filter: {msg_filter}")
+            filter_handler.add_filter(msg_filter)
         kafka_brokers = ",".join(util.get_kafka_brokers(zk_hosts=dep_config.zk_quorum, zk_path=dep_config.zk_brokers_path))
         kafka_consumer_config = {
             "metadata.broker.list": kafka_brokers,
