@@ -145,7 +145,7 @@ def create_filter_handler(input_topics, pipeline_id, selectors):
 
     for input_topic_tmp in input_topics:
         # filterValue can be a list, e.g. when device group with the same service is used as input
-        filter_values = input_topic.filterValue.split(',')
+        filter_values = input_topic_tmp.filterValue.split(',')
         for filter_value in filter_values:
             input_topic = deepcopy(input_topic_tmp)
             input_topic.filterValue = filter_value
