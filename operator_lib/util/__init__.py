@@ -25,6 +25,7 @@ import typing
 import hashlib
 
 import mf_lib
+from copy import deepcopy
 
 def print_init(name, git_info_file):
     lines = list()
@@ -142,12 +143,14 @@ def gen_filter(input_topic, pipeline_id: str, selectors=None):
 def create_filter_handler(input_topics, pipeline_id, selectors):
     filter_handler = mf_lib.FilterHandler()
 
-    for input_topic in input_topics:
+    for input_topic_tmp in input_topics:
         # filterValue can be a list, e.g. when device group with the same service is used as input
         filter_values = input_topic.filterValue.split(',')
         for filter_value in filter_values:
+            input_topic = deepcopy(input_topic_tmp)
             input_topic.filterValue = filter_value
             msg_filter = gen_filter(input_topic=input_topic, selectors=selectors, pipeline_id=pipeline_id)
             filter_handler.add_filter(msg_filter)
+            print(f"added filter: {msg_filter} for filterValue: {input_topic.filterValue}")
     
     return filter_handler
