@@ -144,9 +144,9 @@ def create_filter_handler(input_topics, pipeline_id, selectors):
 
     for input_topic in input_topics:
         # filterValue can be a list, e.g. when device group with the same service is used as input
-        filter_values = input_topic['filterValue'].split(',')
+        filter_values = input_topic.filterValue.split(',')
         for filter_value in filter_values:
-            input_topic["filterValue"] = filter_value
+            input_topic.filterValue = filter_value
             msg_filter = gen_filter(input_topic=input_topic, selectors=selectors, pipeline_id=pipeline_id)
             filter_handler.add_filter(msg_filter)
     
