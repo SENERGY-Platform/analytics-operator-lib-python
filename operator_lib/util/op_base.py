@@ -91,6 +91,7 @@ class OperatorBase:
 
     def __route(self):
         msg_obj = self.__kafka_consumer.poll(timeout=self.__poll_timeout)
+        print(msg_obj)
         if msg_obj:
             if not msg_obj.error():
                 results = self.__call_run(json.loads(msg_obj.value()), msg_obj.topic())
