@@ -66,9 +66,7 @@ class OperatorBase:
     def __call_run(self, message, topic):
         run_results = list()
         try:
-            print(self.__filter_handler.get_sources())
             for result in self.__filter_handler.get_results(message=message):
-                print(f"FILTER_HANDLER: {result}")
                 if not result.ex:
                     for f_id in result.filter_ids:
                         run_result = self.run(
@@ -93,7 +91,6 @@ class OperatorBase:
 
     def __route(self):
         msg_obj = self.__kafka_consumer.poll(timeout=self.__poll_timeout)
-        print(msg_obj)
         if msg_obj:
             if not msg_obj.error():
                 results = self.__call_run(json.loads(msg_obj.value()), msg_obj.topic())
