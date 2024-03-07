@@ -93,7 +93,7 @@ class OperatorBase:
         msg_obj = self.__kafka_consumer.poll(timeout=self.__poll_timeout)
         if msg_obj:
             if not msg_obj.error():
-                results = self.__call_run(json.loads(msg_obj.value()), msg_obj.value()["device_id"])
+                results = self.__call_run(json.loads(msg_obj.value()), json.loads(msg_obj.value())["device_id"])
                 for result in results:
                     self.__kafka_producer.produce(
                         self.__output_topic,
