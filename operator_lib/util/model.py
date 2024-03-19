@@ -31,7 +31,7 @@ class Selector(simple_struct.Structure):
 
 
 class Config(simple_struct.Structure):
-    logger_level = "info"
+    logger_level = "warning"
 
     def __init__(self, d, **kwargs):
         super().__init__(d, **kwargs)
