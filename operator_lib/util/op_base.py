@@ -63,7 +63,7 @@ class OperatorBase:
         setattr(obj, f"_{OperatorBase.__name__}__stopped", False)
         return obj
 
-    def __call_run(self, message, topic):
+    def __call_run(self, message, device_id):
         run_results = list()
         try:
             for result in self.__filter_handler.get_results(message=message):
@@ -72,8 +72,7 @@ class OperatorBase:
                         run_result = self.run(
                             selector=self.__filter_handler.get_filter_args(id=f_id)["selector"],
                             data=result.data,
-                            topic=topic,
-                            filter_value=f_id
+                            device_id=device_id,
                         )
                         if run_result is not None:
                             if isinstance(run_result, list):
@@ -194,7 +193,7 @@ class OperatorBase:
             self.__operator_id
         )
 
-    def run(self, data: typing.Dict[str, typing.Any], selector: str, topic: str, filter_value: str):
+    def run(self, data: typing.Dict[str, typing.Any], selector: str, device_id: str):
         """
         Subclasses must override this method.
         :param data: Dictionary containing data extracted from a message.
