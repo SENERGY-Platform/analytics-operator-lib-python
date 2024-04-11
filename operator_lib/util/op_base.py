@@ -72,7 +72,8 @@ class OperatorBase:
                         run_result = self.run(
                             selector=self.__filter_handler.get_filter_args(id=f_id)["selector"],
                             data=result.data,
-                            topic=topic
+                            topic=topic,
+                            filter_value=f_id
                         )
                         if run_result is not None:
                             if isinstance(run_result, list):
@@ -193,7 +194,7 @@ class OperatorBase:
             self.__operator_id
         )
 
-    def run(self, data: typing.Dict[str, typing.Any], selector: str, topic: str):
+    def run(self, data: typing.Dict[str, typing.Any], selector: str, topic: str, filter_value: str):
         """
         Subclasses must override this method.
         :param data: Dictionary containing data extracted from a message.
