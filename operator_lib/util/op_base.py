@@ -81,7 +81,7 @@ class OperatorBase:
                                 run_results.append(run_result)
                 else:
                     logger.error(result.ex)
-                    self.__handle_result_error(result.ex, message, self.produce)
+                    self.__handle_result_error(result.ex, message, self.produce, device_id)
 
         except mf_lib.exceptions.NoFilterError:
             pass
