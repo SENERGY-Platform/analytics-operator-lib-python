@@ -11,7 +11,7 @@ FILE_NAME_OPERATOR_START_TIME = "operator_start_time.pickle"
 def load_operator_start_time(data_path):
     start_time = load(data_path, FILE_NAME_OPERATOR_START_TIME)
     # fallback when start time was saved without timezone
-    if not start_time.tzinfo:
+    if start_time and not start_time.tzinfo:
         start_time = start_time.astimezone(datetime.timezone.utc)
     return start_time
 
