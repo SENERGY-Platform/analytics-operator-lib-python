@@ -24,6 +24,6 @@ def setup_operator_starttime(data_path):
         operator_start_time = datetime.datetime.now(datetime.timezone.utc)
         logger.info(f"Store operator start time not found -> create and save")
         save_operator_start_time(data_path, operator_start_time)
-    logger.info(f"Operator start time: {timestamp_to_str(operator_start_time)}")
+    logger.info(f"Operator start time: {operator_start_time}")
     return operator_start_time
 
