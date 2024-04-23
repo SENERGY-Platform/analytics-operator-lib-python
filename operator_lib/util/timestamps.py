@@ -14,6 +14,8 @@ def todatetime(timestamp):
     try:
         timestamp = timestamp.tz_convert(tz='UTC')
     except TypeError:
+        # TODO localize german time then convert?
         timestamp = timestamp.tz_localize(tz='UTC')
 
     return timestamp
+

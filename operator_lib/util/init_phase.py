@@ -21,7 +21,6 @@ class InitPhase():
             raise Exception("Operator Start Time File is missing!")
 
     def generate_init_msg(self, timestamp, value_dict):
-        logger.debug(f"Still in initialisation phase! {timestamp} - {self.operator_start_time} < {self.init_phase_duration}")
         td_until_start = self.init_phase_duration - (timestamp - self.operator_start_time)
         minutes_until_start = int(td_until_start.total_seconds()/60)
         return self.__create_message(value_dict, minutes_until_start)
@@ -48,7 +47,10 @@ class InitPhase():
 
     def operator_is_in_init_phase(self, timestamp):
         # sometimes timestamp might be in wrong order, which could trigger an acitve init phase
-        return timestamp-self.operator_start_time < self.init_phase_duration and not self.init_phase_resetted
+        init_active = timestamp-self.operator_start_time < self.init_phase_duration and not self.init_phase_resetted
+        if init_active:
+            logger.debug(f"Still in initialisation phase! {timestamp} - {self.operator_start_time} < {self.init_phase_duration}")
+        return init_active
 
     def init_phase_needs_to_be_reset(self):
         return not self.init_phase_resetted

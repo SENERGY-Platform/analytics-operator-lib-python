@@ -8,7 +8,8 @@ from operator_lib.util.logger import logger
 FILE_NAME_OPERATOR_START_TIME = "operator_start_time.pickle"
 
 def load_operator_start_time(data_path):
-    return load(data_path, FILE_NAME_OPERATOR_START_TIME)
+    start_time = load(data_path, FILE_NAME_OPERATOR_START_TIME)
+    return start_time
 
 def save_operator_start_time(data_path, timestamp):
     save(data_path, FILE_NAME_OPERATOR_START_TIME, timestamp)
