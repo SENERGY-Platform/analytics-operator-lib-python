@@ -13,7 +13,7 @@ def load_operator_start_time(data_path):
 def save_operator_start_time(data_path, timestamp):
     save(data_path, FILE_NAME_OPERATOR_START_TIME, timestamp)
 
-def setup_operator_starttime(self, data_path):
+def setup_operator_starttime(data_path):
     operator_start_time = load_operator_start_time(data_path)
     if not operator_start_time:
         operator_start_time = datetime.datetime.now()
