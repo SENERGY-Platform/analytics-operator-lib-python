@@ -2,6 +2,8 @@ from operator_lib.util.persistence import load, save
 from operator_lib.util.logger import logger
 from operator_lib.util.start_time import load_operator_start_time
 
+__all__ = ("InitPhase", )
+
 FILE_NAME_INIT_PHASE_RESET = "init_phase_was_resetted.pickle"
 FILE_NAME_INIT_PHASE_SENT = "init_phase_was_sent.pickle"
 
