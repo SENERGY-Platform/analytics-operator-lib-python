@@ -1,6 +1,6 @@
 import pandas as pd
 
-__all__ = ("todatetime", )
+__all__ = ("todatetime", "timestamp_to_str")
 
 def todatetime(timestamp):
     if str(timestamp).isdigit():
@@ -19,3 +19,5 @@ def todatetime(timestamp):
 
     return timestamp
 
+def timestamp_to_str(timestamp):
+    return str(timestamp.tz_localize(None))+"Z"
