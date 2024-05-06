@@ -10,14 +10,13 @@ class InitPhase():
     def __init__(
         self, 
         data_path,
-        init_phase_duration
+        init_phase_duration,
+        first_data_time
     ):
         self.data_path = data_path
         self.init_phase_duration = init_phase_duration
         self.__load_state()
-        self.first_data_time = load(data_path, "first_data_time.pickle")
-        if not self.first_data_time:
-            raise Exception("First Data Time File is missing!")
+        self.first_data_time = first_data_time
 
     def generate_init_msg(self, timestamp, value_dict):
         td_until_start = self.init_phase_duration - (timestamp - self.first_data_time)
