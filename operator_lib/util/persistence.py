@@ -1,10 +1,10 @@
 import os 
 import pickle 
 
-def load(data_path, file_name):
+def load(data_path, file_name, default=None):
     file_path = os.path.join(data_path, file_name)
     if not os.path.exists(file_path):
-        return None 
+        return default 
     with open(file_path, 'rb') as f:
         timestamp = pickle.load(f)
         return timestamp
