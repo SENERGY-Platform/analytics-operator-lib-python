@@ -17,6 +17,7 @@
 __all__ = ("logger", "init_logger")
 
 import logging
+import sys 
 
 logging_levels = {
     'info': logging.INFO,
@@ -43,4 +44,6 @@ logger.addHandler(handler)
 def init_logger(level):
     if level not in logging_levels.keys():
         raise LoggerError(level)
-    logger.setLevel(logging_levels[level])
+    log_level = logging_levels[level]
+    logger.setLevel(log_level)
+    logging.basicConfig(stream=sys.stdout, level=log_level)
