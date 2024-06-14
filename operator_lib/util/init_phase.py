@@ -29,6 +29,7 @@ class InitPhase():
         if not self.init_phase_resetted and not self.init_phase_was_sent:
             init_msg = self.__create_message(value_dict)
             self.produce(init_msg)
+            save(self.data_path, FILE_NAME_INIT_PHASE_SENT, True)
 
     def __create_message(self, value_dict, minutes_until_start=None):
         if not minutes_until_start:
