@@ -47,7 +47,9 @@ setuptools.setup(
         'concurrency-watchdog @ git+https://github.com/SENERGY-Platform/concurrency-watchdog.git@0.1.1',
         'confluent_kafka<2',
         'kazoo<3',
-        'prometheus-client<1'
+        'prometheus-client<1',
+        'model_trainer_client @ git+https://github.com/SENERGY-Platform/ml-trainer@v2.0.56#subdirectory=client',
+        'mlflow==2.11.1'
     ],
     packages=setuptools.find_packages(),
     python_requires='>=3.5.3',
