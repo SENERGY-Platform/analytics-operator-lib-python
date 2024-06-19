@@ -109,7 +109,7 @@ class Trainer():
 
     def check_exisiting_job_id(self):
         if self.job_id:
-            self.downloader.start_loop(self.job_id)
+            self.downloader.enable_check(self.job_id)
 
     def start_training(self, job_request):
         self.job_id = self.client.start_training(job_request, self.endpoint)
