@@ -23,7 +23,8 @@ class Downloader(threading.Thread):
         self.check_interval_seconds = check_interval_seconds
         self.model_ref = model_ref
         self.ml_trainer_url = ml_trainer_url
-        self.__stop = True
+        self.__stop = False
+        self.job_id = None
         self.client = TrainerClient(ml_trainer_url, logger)
         mlflow.set_tracking_uri(mlflow_url)
 
@@ -129,4 +130,7 @@ class Trainer():
     def stop(self):
         self.downloader.stop()
         self.downloader.join(timeout=10)
+
+    def join(self):
+        self.downloader.join(timeout=30)
   
