@@ -60,6 +60,7 @@ class Downloader(threading.Thread):
     
     def stop(self):
         self.logger.info("Stop Downloader Loop")
+        self.disable_check()
         self.__stop = True
 
     def enable_check(self, job_id):
