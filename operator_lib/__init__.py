@@ -14,7 +14,7 @@
    limitations under the License.
 """
 
-__version__ = 'v1.1.6'
+__version__ = 'v1.1.7'
 __title__ = 'operator-lib'
 __description__ = 'Library for users wanting to implement analytics operators in python.'
 __url__ = 'https://github.com/SENERGY-Platform/analytics-operator-lib-python'

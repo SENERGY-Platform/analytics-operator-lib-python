@@ -71,16 +71,16 @@ class Trainer():
         data_path,
         ml_trainer_url,
         endpoint,
-        downloader: Downloader,
+        model_ref,
         last_training_time,
         train_interval,
         train_level,
-        retrain: bool
+        retrain: bool,
+        mlflow_url
     ) -> None:
         self.logger = logger
         self.data_path = data_path
         self.ml_trainer_url = ml_trainer_url
-        self.downloader = downloader
         self.job_id = load(data_path, JOB_ID_FILENAME)
         self.last_training_time = last_training_time
         self.train_interval = train_interval
@@ -88,10 +88,17 @@ class Trainer():
         self.retrain = retrain
         self.endpoint = endpoint
         self.client = TrainerClient(ml_trainer_url, logger)
+        
+        self.downloader = Downloader(
+            self.logger,
+            model_ref,
+            mlflow_url,
+            ml_trainer_url
+        )
 
         self.downloader.start() # Start the downloader thread
         self.check_exisiting_job_id()
-        
+
     def check_exisiting_job_id(self):
         if self.job_id:
             self.downloader.start_loop(self.job_id)
@@ -118,4 +125,8 @@ class Trainer():
             return True
 
         return False
+
+    def stop(self):
+        self.downloader.stop()
+        self.downloader.join(timeout=10)
   
