@@ -30,13 +30,13 @@ class Downloader(threading.Thread):
     def run(self):
         self.logger.info("Start Downloader Thread")
         while not self.__stop:
-            self.check()
-            self.wait()
+            self.__check()
+            self.__wait()
 
-    def wait(self):
+    def __wait(self):
         time.sleep(self.check_interval_seconds)
 
-    def check(self):
+    def __check(self):
         if not self.job_id:
             self.logger.debug(f"Job ID missing")
             return 
@@ -45,13 +45,16 @@ class Downloader(threading.Thread):
             self.logger.debug(f"Job {self.job_id} not ready yet")
             return
 
-        model_uri = f"models:/{self.job_id}@production"
-        self.logger.debug(f"Try to download model {self.job_id}")
-        model = mlflow.pyfunc.load_model(model_uri)
-        self.logger.debug(f"Downloading model {self.job_id} was succesfull")
-        self.model_ref = model
+        self.download(self.job_id)
         self.stop()
 
+    def download(self, job_id):
+        model_uri = f"models:/{job_id}@production"
+        self.logger.debug(f"Try to download model {job_id}")
+        model = mlflow.pyfunc.load_model(model_uri)
+        self.logger.debug(f"Downloading model {job_id} was succesfull")
+        self.model_ref = model
+    
     def stop(self):
         self.logger.info("Stop Downloader Loop")
         self.__stop = True
