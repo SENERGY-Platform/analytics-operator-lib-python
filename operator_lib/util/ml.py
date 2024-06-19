@@ -45,14 +45,14 @@ class Downloader(threading.Thread):
             self.logger.debug(f"Job {self.job_id} not ready yet")
             return
 
-        self.download(self.job_id)
+        self.__download()
         self.stop()
 
-    def download(self, job_id):
-        model_uri = f"models:/{job_id}@production"
-        self.logger.debug(f"Try to download model {job_id}")
+    def __download(self):
+        model_uri = f"models:/{self.job_id}@production"
+        self.logger.debug(f"Try to download model {self.job_id}")
         model = mlflow.pyfunc.load_model(model_uri)
-        self.logger.debug(f"Downloading model {job_id} was succesfull")
+        self.logger.debug(f"Downloading model {self.job_id} was succesfull")
         self.model_ref = model
     
     def stop(self):
