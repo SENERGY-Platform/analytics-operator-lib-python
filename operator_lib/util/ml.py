@@ -77,7 +77,8 @@ class Trainer():
         train_interval,
         train_level,
         retrain: bool,
-        mlflow_url
+        mlflow_url,
+        check_interval_seconds
     ) -> None:
         self.logger = logger
         self.data_path = data_path
@@ -94,7 +95,8 @@ class Trainer():
             self.logger,
             model_ref,
             mlflow_url,
-            ml_trainer_url
+            ml_trainer_url,
+            check_interval_seconds
         )
 
         self.downloader.start() # Start the downloader thread
