@@ -60,7 +60,7 @@ class Downloader(threading.Thread):
         self.__stop = True
 
     def start_loop(self, job_id):
-        self.logger.info("Start Downloader Loop")
+        self.logger.info(f"Start Downloader Loop for job id: {job_id}")
         self.job_id = job_id
         self.__stop = False
 
@@ -88,6 +88,13 @@ class Trainer():
         self.retrain = retrain
         self.endpoint = endpoint
         self.client = TrainerClient(ml_trainer_url, logger)
+
+        self.downloader.start() # Start the downloader thread
+        self.check_exisiting_job_id()
+        
+    def check_exisiting_job_id(self):
+        if self.job_id:
+            self.downloader.start_loop(self.job_id)
 
     def start_training(self, job_request):
         self.job_id = self.client.start_training(job_request, self.endpoint)
