@@ -24,6 +24,7 @@ class Downloader(threading.Thread):
         self.model_ref = model_ref
         self.ml_trainer_url = ml_trainer_url
         self.__stop = False
+        self.check = False
         self.job_id = None
         self.client = TrainerClient(ml_trainer_url, logger)
         mlflow.set_tracking_uri(mlflow_url)
@@ -31,8 +32,9 @@ class Downloader(threading.Thread):
     def run(self):
         self.logger.info("Start Downloader Thread")
         while not self.__stop:
-            self.__check()
-            self.__wait()
+            while self.check:
+                self.__check()
+                self.__wait()
 
     def __wait(self):
         time.sleep(self.check_interval_seconds)
@@ -47,7 +49,7 @@ class Downloader(threading.Thread):
             return
 
         self.__download()
-        self.stop()
+        self.disable_check()
 
     def __download(self):
         model_uri = f"models:/{self.job_id}@production"
@@ -60,10 +62,13 @@ class Downloader(threading.Thread):
         self.logger.info("Stop Downloader Loop")
         self.__stop = True
 
-    def start_loop(self, job_id):
-        self.logger.info(f"Start Downloader Loop for job id: {job_id}")
+    def enable_check(self, job_id):
+        self.logger.info(f"Check for job id: {job_id}")
         self.job_id = job_id
-        self.__stop = False
+        self.check = True
+
+    def disable_check(self):
+        self.check = False
 
 class Trainer():
     def __init__(
@@ -110,24 +115,25 @@ class Trainer():
         self.job_id = self.client.start_training(job_request, self.endpoint)
         save(self.data_path, JOB_ID_FILENAME, self.job_id)
         self.logger.debug(f"Created Training Job with ID: {self.job_id}")
-        self.downloader.start_loop(self.job_id)
+        self.downloader.enable_check(self.job_id)
 
     def training_shall_start(self, timestamp):
-        # Training shall start when there is enough initial data or when retraining is enabled
+        if not self.retrain and self.job_id:
+            self.logger.debug("Retrain is disabled and there a job exists already.")
+            return False
+        
         self.logger.debug(f"Current Time: {timestamp} - Last Train Time: {self.last_training_time} < {self.train_interval}{self.train_level}")
         if timestamp - self.last_training_time < pd.Timedelta(self.train_interval, self.train_level):
             self.logger.debug("Wait with training until enough data is collected")
             return False 
 
         if not self.job_id:
-            self.logger.debug("No existing JobID -> Start first training")
-            return True 
+            self.logger.debug("No existing JobID -> Start first training") 
 
         if self.retrain:
-            self.logger.debug("Retrain Period over. Start new training.")
-            return True
+            self.logger.debug("Retrain period is over -> Start new traning")
 
-        return False
+        return True
 
     def stop(self):
         self.downloader.stop()
