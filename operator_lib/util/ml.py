@@ -72,6 +72,11 @@ class Downloader(threading.Thread):
         self.check = False
 
 class Trainer():
+    # Manages model trainings, polls for status and downloads the model
+    # When instantiated, it will check for an existing/persisted job id 
+    # Otherwise it will poll for job status after a job was created
+    # The polling is done in a background thread within an interval
+    
     def __init__(
         self, 
         logger, 

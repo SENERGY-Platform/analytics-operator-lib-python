@@ -45,7 +45,7 @@ setuptools.setup(
         'simple-env-var-manager @ git+https://github.com/y-du/simple-env-var-manager.git@2.3.0',
         'simple-struct @ git+https://github.com/y-du/simple-struct.git@0.2.0',
         'concurrency-watchdog @ git+https://github.com/SENERGY-Platform/concurrency-watchdog.git@0.1.1',
-        'confluent_kafka<2',
+        'confluent_kafka<==2.4.0',
         'kazoo<3',
         'prometheus-client<1',
         'model_trainer_client @ git+https://github.com/SENERGY-Platform/ml-trainer@v2.0.59#subdirectory=client',
