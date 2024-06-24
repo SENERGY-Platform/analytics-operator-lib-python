@@ -13,7 +13,7 @@ class Downloader(threading.Thread):
     def __init__(
         self, 
         logger,
-        model_ref,
+        detector_class_ref,
         mlflow_url,
         ml_trainer_url,
         check_interval_seconds=60,
@@ -21,7 +21,7 @@ class Downloader(threading.Thread):
         threading.Thread.__init__(self)
         self.logger = logger 
         self.check_interval_seconds = check_interval_seconds
-        self.model_ref = model_ref
+        self.detector_class_ref = detector_class_ref
         self.ml_trainer_url = ml_trainer_url
         self.__stop = False
         self.check = False
@@ -56,7 +56,7 @@ class Downloader(threading.Thread):
         self.logger.debug(f"Try to download model {self.job_id}")
         model = mlflow.pyfunc.load_model(model_uri)
         self.logger.debug(f"Downloading model {self.job_id} was succesfull")
-        self.model_ref = model
+        self.detector_class_ref.model = model
     
     def stop(self):
         self.logger.info("Stop Downloader Loop")
@@ -83,7 +83,7 @@ class Trainer():
         data_path,
         ml_trainer_url,
         endpoint,
-        model_ref,
+        detector_class_ref,
         last_training_time,
         train_interval,
         train_level,
@@ -104,7 +104,7 @@ class Trainer():
         
         self.downloader = Downloader(
             self.logger,
-            model_ref,
+            detector_class_ref,
             mlflow_url,
             ml_trainer_url,
             check_interval_seconds

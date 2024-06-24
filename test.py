@@ -5,6 +5,8 @@ class A():
 
 def b(n):
     print(n.a)
+    n.a = 2
 
 a = A()
 a.t(b)
+print(a.a)
