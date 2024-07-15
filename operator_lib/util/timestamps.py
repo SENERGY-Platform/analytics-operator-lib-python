@@ -20,4 +20,4 @@ def todatetime(timestamp):
     return timestamp
 
 def timestamp_to_str(timestamp):
-    return str(timestamp.tz_localize(None))+"Z"
+    return timestamp.tz_localize(None).isoformat()+"Z"
