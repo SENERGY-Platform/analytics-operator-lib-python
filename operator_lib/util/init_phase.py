@@ -21,9 +21,7 @@ class InitPhase():
         self.produce = produce
 
     def generate_init_msg(self, timestamp, value_dict):
-        td_until_start = self.init_phase_duration - (timestamp - self.first_data_time)
-        minutes_until_start = int(td_until_start.total_seconds()/60)
-        return self.__create_message(value_dict, minutes_until_start)
+        return self.__create_message(value_dict)
     
     def send_first_init_msg(self, value_dict):
         if not self.init_phase_resetted and not self.init_phase_was_sent:
@@ -31,11 +29,9 @@ class InitPhase():
             self.produce(init_msg)
             save(self.data_path, FILE_NAME_INIT_PHASE_SENT, True)
 
-    def __create_message(self, value_dict, minutes_until_start=None):
-        if not minutes_until_start:
-            minutes_until_start = int(self.init_phase_duration.total_seconds()/60)
-
-        value_dict["initial_phase"] = f"Die Anwendung befindet sich noch für ca. {minutes_until_start} Minuten in der Initialisierungsphase"
+    def __create_message(self, value_dict, end_ts=None):
+        end_ts = self.first_data_time + self.init_phase_duration
+        value_dict["initial_phase"] = f"Die Anwendung befindet sich noch bis ca. {end_ts.isoformat()} in der Initialisierungsphase"
         return value_dict
 
     def __load_state(self):
