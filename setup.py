@@ -48,7 +48,7 @@ setuptools.setup(
         'confluent_kafka==2.4.0',
         'kazoo<3',
         'prometheus-client<1',
-        'model_trainer_client @ git+https://github.com/SENERGY-Platform/ml-trainer@v2.0.59#subdirectory=client',
+        'model_trainer_client @ git+https://github.com/SENERGY-Platform/ml-trainer@v2.0.65#subdirectory=client',
         'mlflow==2.11.1'
     ],
     packages=setuptools.find_packages(),
