@@ -42,6 +42,8 @@ logger.addHandler(handler)
 
 
 def init_logger(level):
+    if level == "":
+        level = "warning"
     if level not in logging_levels.keys():
         raise LoggerError(level)
     log_level = logging_levels[level]
