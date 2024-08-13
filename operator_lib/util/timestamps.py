@@ -20,8 +20,11 @@ def todatetime(timestamp):
 
     return timestamp
 
-def timestamp_to_str(timestamp):
-    return timestamp.tz_localize(None).isoformat()+"Z"
+def timestamp_to_str(timestamp): # timestamp is supposed to be a pandas timestamp here!
+    if "." not in timestamp.tz_localize(None).isoformat():# Ensure that the string format of the timestamp is always %Y-%m-%dT%H:%M:%S.%fZ
+        return timestamp.tz_localize(None).isoformat()+".000Z"
+    else:
+        return timestamp.tz_localize(None).isoformat()+"Z"
 
 DATETIME_FORMATS = [
     ("yyyy-MM-ddTHH:mm:ss.SSSZ", "^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"), #2023-06-01T12:34:56.789Z
