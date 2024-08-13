@@ -82,7 +82,6 @@ class Trainer():
         logger, 
         data_path,
         ml_trainer_url,
-        endpoint,
         detector_class_ref,
         last_training_time,
         train_interval,
@@ -99,7 +98,6 @@ class Trainer():
         self.train_interval = train_interval
         self.train_level = train_level
         self.retrain = retrain
-        self.endpoint = endpoint
         self.client = TrainerClient(ml_trainer_url, logger)
         
         self.downloader = Downloader(
@@ -118,7 +116,7 @@ class Trainer():
             self.downloader.enable_check(self.job_id)
 
     def start_training(self, job_request):
-        self.job_id = self.client.start_training(job_request, self.endpoint)
+        self.job_id = self.client.start_training(job_request)
         save(self.data_path, JOB_ID_FILENAME, self.job_id)
         self.logger.debug(f"Created Training Job with ID: {self.job_id}")
         self.downloader.enable_check(self.job_id)
