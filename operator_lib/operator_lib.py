@@ -39,6 +39,7 @@ class OperatorLib:
         util.logger.debug(f"operator config: {opr_config}")
         filter_handler = util.create_filter_handler(opr_config.inputTopics, dep_config.pipeline_id, operator.selectors)
         if dep_config.kafka_bootstrap is None:
+            util.logger.info(f"Using Zookeeper for kafka broker lookup: {dep_config.zk_quorum}")
             kafka_brokers = ",".join(util.get_kafka_brokers(zk_hosts=dep_config.zk_quorum, zk_path=dep_config.zk_brokers_path))
             kafka_consumer_config = {
                 "metadata.broker.list": kafka_brokers,
@@ -50,6 +51,7 @@ class OperatorLib:
                 "metadata.broker.list": kafka_brokers,
             }
         else:
+            util.logger.info(f"Directly bootstrapping kafka: {dep_config.kafka_bootstrap}")
             kafka_consumer_config = {
                 'bootstrap.servers': dep_config.kafka_bootstrap,
                 "group.id": dep_config.config_application_id,
