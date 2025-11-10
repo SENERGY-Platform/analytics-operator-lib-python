@@ -43,7 +43,7 @@ class Operator(OperatorBase):
 
     # you need to implement this method
     # based on the selector you may call other methods
-    def run(self, data: typing.Dict[str, typing.Any], selector: str):
+    def run(self, data: typing.Dict[str, typing.Any], selector: str, device_id=''):
         print(f"{selector} {data}")
         if data['value'] == 5:
             print('reached the end of sample data, everything seems to be working fine. Stop the operator with CTRL+C')
