@@ -25,6 +25,7 @@ class DeploymentConfig(sevm.Config):
     config = None
     consumer_auto_offset_reset_config = None
     output = None
+    kafka_bootstrap = None
     zk_quorum = None
     config_application_id = None
     device_id_path = None

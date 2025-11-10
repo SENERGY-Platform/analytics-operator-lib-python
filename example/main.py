@@ -51,4 +51,4 @@ class Operator(OperatorBase):
 # launch your operator
 from operator_lib.operator_lib import OperatorLib
 if __name__ == "__main__":
-    OperatorLib(Operator(), name="OperatorLibExample", git_info_file='example/git_commit')
+    OperatorLib(Operator(), name="OperatorLibExample", git_info_file='git_commit')
