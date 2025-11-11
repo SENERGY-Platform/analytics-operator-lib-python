@@ -16,6 +16,8 @@
 import util  # Dont do this in your operator!
 util.setup() # Dont do this in your operator!
 
+import datetime
+
 
 # define your operators config
 from operator_lib.util import Config
@@ -43,8 +45,8 @@ class Operator(OperatorBase):
 
     # you need to implement this method
     # based on the selector you may call other methods
-    def run(self, data: typing.Dict[str, typing.Any], selector: str, device_id=''):
-        print(f"{selector} {data}")
+    def run(self, data: typing.Dict[str, typing.Any], selector: str, device_id, timestamp: datetime.datetime):
+        print(f"{timestamp} {selector} {data}")
         if data['value'] == 5:
             print('reached the end of sample data, everything seems to be working fine. Stop the operator with CTRL+C')
 

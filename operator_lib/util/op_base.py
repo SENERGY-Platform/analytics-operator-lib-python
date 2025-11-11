@@ -63,7 +63,7 @@ class OperatorBase:
         setattr(obj, f"_{OperatorBase.__name__}__stopped", False)
         return obj
 
-    def __call_run(self, message, device_id):
+    def __call_run(self, message, device_id, timestamp: datetime.datetime):
         run_results = list()
         try:
             for result in self.__filter_handler.get_results(message=message):
@@ -73,6 +73,7 @@ class OperatorBase:
                             selector=self.__filter_handler.get_filter_args(id=f_id)["selector"],
                             data=result.data,
                             device_id=device_id,
+                            timestamp=timestamp,
                         )
                         if run_result is not None:
                             if isinstance(run_result, list):
@@ -93,7 +94,13 @@ class OperatorBase:
         msg_obj = self.__kafka_consumer.poll(timeout=self.__poll_timeout)
         if msg_obj:
             if not msg_obj.error():
-                results = self.__call_run(json.loads(msg_obj.value()), json.loads(msg_obj.value()).get('device_id'))
+                ts_data = msg_obj.timestamp()
+                if ts_data[0] != confluent_kafka.TIMESTAMP_NOT_AVAILABLE:
+                    timestamp = datetime.datetime.fromtimestamp(ts_data[1])
+                else:
+                    logger.error("Kafka Broker does not support timestamps, using now() as substitute")
+                    timestamp = datetime.datetime.now()
+                results = self.__call_run(json.loads(msg_obj.value()), json.loads(msg_obj.value()).get('device_id'), timestamp)
                 for result in results:
                     self.__kafka_producer.produce(
                         self.__output_topic,
@@ -193,11 +200,13 @@ class OperatorBase:
             self.__operator_id
         )
 
-    def run(self, data: typing.Dict[str, typing.Any], selector: str, device_id: str):
+    def run(self, data: typing.Dict[str, typing.Any], selector: str, device_id: str, timestamp: datetime.datetime):
         """
         Subclasses must override this method.
         :param data: Dictionary containing data extracted from a message.
         :param selector: Name of a selector identifying the extracted data.
+        :param device_id: ID of the device the message originates from
+        :param timestamp: Kafka stored message timestamp.
         :return: Result data or None.
         """
         pass
