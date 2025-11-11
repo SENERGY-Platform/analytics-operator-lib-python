@@ -1,7 +1,12 @@
 services:
   kafka:
     image: docker.io/lensesio/fast-data-dev
-    network_mode: host # this is naughty, but kafka is very picky
+    #network_mode: host # this is naughty, but kafka is very picky
+    ports:
+      - 9092:9092
+      - 8081:8081
+      - 8083:8083
+      - 3030:3030
     healthcheck:
       test: ["CMD-SHELL", "kafka-topics --list --bootstrap-server 127.0.0.1:9092"]
       interval: 2s

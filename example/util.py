@@ -24,7 +24,7 @@ def setup():
     # Set up variables, will be set by flow-engine
     import os
     os.environ["ZK_QUORUM"] = "localhost:2181"
-    os.environ["KAFKA_BOOTSTRAP"] = "localhost:9092"
+    os.environ["CONFIG_BOOTSTRAP_SERVERS"] = "localhost:9092"
     os.environ["CONFIG_APPLICATION_ID"] = "analytics-test"
     os.environ["PIPELINE_ID"] = "fake-pipeline-id"
     os.environ["WINDOW_TIME"] = "30"
