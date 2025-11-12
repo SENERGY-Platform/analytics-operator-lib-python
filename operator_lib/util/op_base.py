@@ -96,7 +96,7 @@ class OperatorBase:
             if not msg_obj.error():
                 ts_data = msg_obj.timestamp()
                 if ts_data[0] != confluent_kafka.TIMESTAMP_NOT_AVAILABLE:
-                    timestamp = datetime.datetime.fromtimestamp(ts_data[1])
+                    timestamp = datetime.datetime.fromtimestamp(ts_data[1]/1000)
                 else:
                     logger.error("Kafka Broker does not support timestamps, using now() as substitute")
                     timestamp = datetime.datetime.now()
