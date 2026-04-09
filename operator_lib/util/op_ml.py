@@ -26,7 +26,7 @@ import mlflow
 from mlflow import MlflowClient
 from mlflow.pyfunc import PyFuncModel, PythonModel
 
-from datetime import datetime
+import datetime
 
 
 class MLOperator(OperatorBase):
