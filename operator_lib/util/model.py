@@ -32,6 +32,7 @@ class Selector(simple_struct.Structure):
 
 class Config(simple_struct.Structure):
     logger_level = "warning"
+    mlflow_url = "http://mlflow-svc.mlflow.svc.cluster.local:5000"
 
     def __init__(self, d, **kwargs):
         super().__init__(d, **kwargs)
