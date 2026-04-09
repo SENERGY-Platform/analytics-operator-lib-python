@@ -16,7 +16,7 @@
 
 __all__ = ("MLOperator",)
 
-from operator_lib.util.op_base import OperatorBase
+from .op_base import OperatorBase
 
 import typing
 import datetime
