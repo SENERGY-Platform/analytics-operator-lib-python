@@ -24,6 +24,7 @@ import typing
 import abc
 import mlflow
 from mlflow import MlflowClient
+from mlflow.pyfunc import PyFuncModel, PythonModel
 
 from datetime import datetime
 
@@ -35,13 +36,12 @@ class MLOperator(OperatorBase):
         self.__model_id = f"pipeline-{self.get_pipeline_id}_operator-{self.get_operator_id}"
         model = self.load_model()
         if model is None:
-            model = self.train()
+            model = self.train(self.model)
             if model is not None:
                 self.update_model(model)
         
         
-    def update_model(self, model: mlflow.PyFuncModel):
-        self.model = model
+    def update_model(self, model: PythonModel):
         # This will store the model at MLFlow model registry
         # If it does not exist, it will be created with version 1
         # All following models will increment the version by 1
@@ -59,7 +59,7 @@ class MLOperator(OperatorBase):
 
             mlflow.pyfunc.log_model(
                 artifact_path=run_relative_artifact_path,
-                python_model=self.model,
+                python_model=model,
                 # signature=signature TODO
             )
         
@@ -68,8 +68,9 @@ class MLOperator(OperatorBase):
         created_model_version = mlflow.register_model(model_uri, job_name)
         client = MlflowClient()
         client.set_registered_model_alias(job_name, "production", created_model_version.version)
+        self.model = mlflow.pyfunc.load_model(f"models:/{self.__model_id}@production")
         
-    def load_model(self) -> typing.Optional[mlflow.PyFuncModel]:
+    def load_model(self) -> typing.Optional[PyFuncModel]:
         try:
             self.model = mlflow.pyfunc.load_model(f"models:/{self.__model_id}@production")
         except Exception:
@@ -77,7 +78,7 @@ class MLOperator(OperatorBase):
         return self.model
         
     @abc.abstractmethod
-    def infer(self, model: mlflow.PyFuncModel, data: typing.Dict[str, typing.Any], selector: str, device_id: str, timestamp: datetime.datetime) -> typing.Tuple[typing.Optional[typing.Any], typing.Optional[mlflow.PyFuncModel]]:
+    def infer(self, model: typing.Optional[PyFuncModel], data: typing.Dict[str, typing.Any], selector: str, device_id: str, timestamp: datetime.datetime) -> typing.Tuple[typing.Optional[typing.Any], typing.Optional[PythonModel]]:
         """
         Subclasses must override this method.
         :param model: The current model
@@ -90,7 +91,7 @@ class MLOperator(OperatorBase):
         pass
     
     @abc.abstractmethod
-    def train(self, model: typing.Optional[mlflow.PyFuncModel]) -> typing.Optional[mlflow.PyFuncModel]:
+    def train(self, model: typing.Optional[PyFuncModel]) -> typing.Optional[PythonModel]:
         """
         Subclasses must override this method.
         :param model: The current model
@@ -99,7 +100,7 @@ class MLOperator(OperatorBase):
         return None
     
     @abc.abstractmethod
-    def need_retraining(self, model: mlflow.PyFuncModel) -> bool:
+    def need_retraining(self, model: typing.Optional[PyFuncModel]) -> bool:
         """
         Subclasses must override this method.
         :param model: The current model
