@@ -5,12 +5,8 @@ from operator_lib.util.model import InputTopic
 import base64
 import time
 
-__conn_str = ''
-
-
+@ray.remote
 def get_timescale_dataset(conn_str: str, conf: InputTopic, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:
-    global __conn_str
-    __conn_str = conn_str
     table_name = __quote_identifier(__get_table_name(
         conf.filterValue, conf.name.replace("_", ":")))
     columns = []
@@ -32,7 +28,7 @@ def get_timescale_dataset(conn_str: str, conf: InputTopic, duration: datetime.ti
     """
     if require_full_duration:
         enough_data = False
-        conn = __create_timescale_connection()
+        conn = __create_timescale_connection(conn_str)
         while not enough_data:
             cursor = conn.cursor()
             cursor.execute(query + " LIMIT 1")
@@ -48,7 +44,7 @@ def get_timescale_dataset(conn_str: str, conf: InputTopic, duration: datetime.ti
             else:
                 time.sleep(duration)  # currently no data -> sleep for full duration
 
-    return ray.data.read_sql(query, __create_timescale_connection)
+    return ray.data.read_sql(query, lambda: __create_timescale_connection(conn_str))
 
 
 def __quote_identifier(value: str) -> str:
@@ -68,7 +64,6 @@ def __get_table_name(device_id: str, service_id: str) -> str:
     return f"device:{short_device_id}_service:{short_service_id}"
 
 
-def __create_timescale_connection():
-    return psycopg2.connect(
-        __conn_str
-    )
+
+def __create_timescale_connection(conn_str: str):
+    return psycopg2.connect(conn_str)
