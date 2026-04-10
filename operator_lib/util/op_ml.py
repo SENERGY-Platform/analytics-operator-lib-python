@@ -25,7 +25,6 @@ import abc
 import mlflow
 from mlflow import MlflowClient
 from mlflow.pyfunc import PyFuncModel, PythonModel
-
 import datetime
 
 
@@ -33,7 +32,7 @@ class MLOperator(OperatorBase):
     def init(self, *args, **kwargs):
         super().init(*args, **kwargs)
         mlflow.set_tracking_uri(self.config.mlflow_url)
-        self.__model_id = f"pipeline-{self.get_pipeline_id}_operator-{self.get_operator_id}"
+        self.__model_id = f"pipeline-{self.get_pipeline_id()}_operator-{self.get_operator_id()}"
         model = self.load_model()
         if model is None:
             model = self.train(self.model)

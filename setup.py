@@ -49,7 +49,10 @@ setuptools.setup(
         'kazoo<3',
         'prometheus-client<1',
         'model_trainer_client @ git+https://github.com/SENERGY-Platform/ml-trainer@v2.0.65#subdirectory=client',
-        'mlflow==3.8.1'
+        'mlflow==3.8.1',
+        'ray[data]==2.54.1',
+        'ray[client]==2.54.1',
+        'psycopg2-binary==2.9.11',
     ],
     packages=setuptools.find_packages(),
     python_requires='>=3.5.3',
