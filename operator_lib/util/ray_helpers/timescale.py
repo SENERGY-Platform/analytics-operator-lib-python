@@ -70,5 +70,5 @@ def __get_table_name(device_id: str, service_id: str) -> str:
 
 def __create_timescale_connection():
     return psycopg2.connect(
-        __conn_str
+        "postgresql://postgres:tea@timescale-db.timescale.svc.cluster.local/postgres"
     )
