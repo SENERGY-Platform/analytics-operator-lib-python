@@ -1,2 +1,2 @@
 from .data import provide_historic_data
-from .mlflow_logger import TrainMlflowLoggerCallback
+from .mlflow_logger import TrainMlflowLogger

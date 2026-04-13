@@ -5,7 +5,7 @@ import typing
 import mlflow
 from ray.train import Checkpoint, UserCallback
 
-class TrainMlflowLoggerCallback(UserCallback):
+class TrainMlflowLogger(UserCallback):
     def __init__(self, tracking_uri: str, experiment_name: str, run_id: str):
         self._tracking_uri = tracking_uri
         self._experiment_name = experiment_name
@@ -19,6 +19,28 @@ class TrainMlflowLoggerCallback(UserCallback):
         mlflow.set_experiment(self._experiment_name)
         mlflow.start_run(run_id=self._run_id)
         self._started = True
+
+    def set_tags(self, tags: typing.Dict[str, typing.Any]):
+        self._ensure_started()
+        mlflow.set_tags(tags)
+
+    def log_params(self, params: typing.Dict[str, typing.Any]):
+        self._ensure_started()
+        mlflow.log_params(params)
+
+    def log_metrics(self, metrics: typing.Dict[str, typing.Any], step: typing.Optional[int] = None):
+        self._ensure_started()
+        numeric_metrics = {k: float(v) for k, v in metrics.items() if isinstance(v, numbers.Number)}
+        if numeric_metrics:
+            mlflow.log_metrics(numeric_metrics, step=step)
+
+    def log_dict(self, dictionary: typing.Dict[str, typing.Any], artifact_file: str):
+        self._ensure_started()
+        mlflow.log_dict(dictionary, artifact_file)
+
+    def log_text(self, text: str, artifact_file: str):
+        self._ensure_started()
+        mlflow.log_text(text, artifact_file)
 
     def _aggregate_metrics(self, worker_metrics: typing.List[typing.Dict[str, typing.Any]]) -> typing.Dict[str, float]:
         if not worker_metrics:

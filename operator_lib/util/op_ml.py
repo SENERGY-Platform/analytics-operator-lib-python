@@ -16,7 +16,7 @@
 
 __all__ = ("MLOperator",)
 
-from .ray_helpers.mlflow_logger import TrainMlflowLoggerCallback
+from .ray_helpers.mlflow_logger import TrainMlflowLogger
 
 from .op_base import OperatorBase
 
@@ -91,7 +91,7 @@ class MLOperator(OperatorBase):
         pass
 
     @abc.abstractmethod
-    def train(self, model: typing.Optional[PyFuncModel], logger: TrainMlflowLoggerCallback) -> typing.Optional[PythonModel]:
+    def train(self, model: typing.Optional[PyFuncModel], logger: TrainMlflowLogger) -> typing.Optional[PythonModel]:
         """
         Subclasses must override this method.
         :param model: The current model
@@ -111,7 +111,7 @@ class MLOperator(OperatorBase):
     def __start_run(self):
         job_name = f"{self.model_id}@{datetime.datetime.now().isoformat(timespec='microseconds')}"
         self.__run = mlflow.start_run(run_name=job_name)
-        self.__mlflow_logger = TrainMlflowLoggerCallback(self.config.mlflow_url, self.model_id, self.__run.info.run_id)
+        self.__mlflow_logger = TrainMlflowLogger(self.config.mlflow_url, self.model_id, self.__run.info.run_id)
     
     def __wrap_training(self):
         self.__start_run()
