@@ -10,7 +10,7 @@ def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str,
     # Lazy import avoids importing operator_lib.util during package initialization.
     from operator_lib.util import gen_identifiers
 
-    now = datetime.datetime.now
+    now = datetime.datetime.now()
     cutoff = now - duration
     filter = gen_identifiers(name=input_topic.name, f_type=input_topic.filterType,
                                        f_value=input_topic.filterValue, pipeline_id=pipeline_id)
