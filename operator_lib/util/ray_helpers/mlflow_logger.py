@@ -61,9 +61,8 @@ class TrainMlflowLogger(UserCallback):
         self._ensure_started()
 
         aggregated_metrics = self._aggregate_metrics(metrics)
-        epoch_value = "latest"
+        step = None
         if aggregated_metrics:
-            step = None
             epoch_value = aggregated_metrics.get("epoch")
             if isinstance(epoch_value, numbers.Number):
                 step = int(epoch_value)
@@ -71,7 +70,7 @@ class TrainMlflowLogger(UserCallback):
 
         if checkpoint is not None:            
             with checkpoint.as_directory() as checkpoint_dir:
-                mlflow.log_artifacts(checkpoint_dir, artifact_path=f"checkpoints/{epoch_value}")
+                mlflow.log_artifacts(checkpoint_dir, artifact_path=f"checkpoints/{step}")
 
     def after_exception(self, run_context, worker_exceptions: typing.Dict[int, Exception]):
         self.finish(status="FAILED")
