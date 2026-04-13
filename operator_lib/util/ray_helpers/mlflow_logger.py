@@ -1,5 +1,7 @@
 import numbers
+import time
 import typing
+from contextlib import contextmanager
 
 
 import mlflow
@@ -18,10 +20,10 @@ class TrainMlflowLogger(UserCallback):
         mlflow.set_experiment(self._experiment_name)
         active_run = mlflow.active_run()
         if active_run is None:
-            mlflow.start_run(run_id=self._run_id)
+            mlflow.start_run(run_id=self._run_id, log_system_metrics=True)
         elif active_run.info.run_id != self._run_id:
             mlflow.end_run(status="KILLED")
-            mlflow.start_run(run_id=self._run_id)
+            mlflow.start_run(run_id=self._run_id, log_system_metrics=True)
 
     def set_tags(self, tags: typing.Dict[str, typing.Any]):
         self._ensure_started()
@@ -44,6 +46,49 @@ class TrainMlflowLogger(UserCallback):
     def log_text(self, text: str, artifact_file: str):
         self._ensure_started()
         mlflow.log_text(text, artifact_file)
+
+    def log_stage_timing(self, stage_name: str, seconds: float, step: typing.Optional[int] = None):
+        safe_stage = stage_name.replace(" ", "_")
+        self.log_metrics({f"timing.{safe_stage}.seconds": float(seconds)}, step=step)
+
+    @contextmanager
+    def trace(
+        self,
+        stage_name: str,
+        step: typing.Optional[int] = None,
+        inputs: typing.Optional[typing.Dict[str, typing.Any]] = None,
+        attributes: typing.Optional[typing.Dict[str, typing.Any]] = None,
+    ):
+        self._ensure_started()
+        started_at = time.perf_counter()
+
+        # MLflow manual tracing API (GenAI tracing). If unavailable, fall back to metrics-only timing.
+        if hasattr(mlflow, "start_span"):
+            with mlflow.start_span(name=stage_name) as span:
+                if inputs:
+                    span.set_inputs(inputs)
+                if attributes:
+                    for key, value in attributes.items():
+                        span.set_attribute(str(key), value)
+
+                try:
+                    yield span
+                except Exception as exc:
+                    span.set_attribute("error", True)
+                    span.set_attribute("error.type", type(exc).__name__)
+                    span.set_attribute("error.message", str(exc))
+                    raise
+                finally:
+                    elapsed_seconds = time.perf_counter() - started_at
+                    span.set_attribute("duration_seconds", float(elapsed_seconds))
+                    self.log_stage_timing(stage_name, elapsed_seconds, step=step)
+            return
+
+        try:
+            yield None
+        finally:
+            elapsed_seconds = time.perf_counter() - started_at
+            self.log_stage_timing(stage_name, elapsed_seconds, step=step)
 
     def _aggregate_metrics(self, worker_metrics: typing.List[typing.Dict[str, typing.Any]]) -> typing.Dict[str, float]:
         if not worker_metrics:
