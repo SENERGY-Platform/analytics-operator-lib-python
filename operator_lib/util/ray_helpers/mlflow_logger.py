@@ -17,7 +17,7 @@ class TrainMlflowLoggerCallback(UserCallback):
             return
         mlflow.set_tracking_uri(self._tracking_uri)
         mlflow.set_experiment(self._experiment_name)
-        mlflow.start_run(run_name=self._run_name)
+        # mlflow.start_run(run_name=self._run_name)
         self._started = True
 
     def _aggregate_metrics(self, worker_metrics: typing.List[typing.Dict[str, typing.Any]]) -> typing.Dict[str, float]:
