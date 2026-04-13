@@ -44,7 +44,18 @@ def get_timescale_dataset(conn_str: str, conf: InputTopic, duration: datetime.ti
             else:
                 time.sleep(duration)  # currently no data -> sleep for full duration
 
-    ds = ray.data.read_sql(query, lambda: __create_timescale_connection(conn_str))
+    '''
+    Expect to have this function available in timescale: # TODO ensure with job
+    
+    CREATE OR REPLACE FUNCTION timestamptz_to_millis(ts timestamptz)
+    RETURNS bigint AS $$
+    BEGIN
+        RETURN (EXTRACT(EPOCH FROM ts) * 1000)::bigint;
+    END;
+    $$ LANGUAGE plpgsql IMMUTABLE;
+    '''
+    
+    ds = ray.data.read_sql(query, lambda: __create_timescale_connection(conn_str), shard_keys=["time"], shard_hash_fn="timestamptz_to_millis")
     return ds
 
 
