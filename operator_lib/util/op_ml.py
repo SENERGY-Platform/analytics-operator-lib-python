@@ -16,6 +16,8 @@
 
 __all__ = ("MLOperator",)
 
+from .ray_helpers.mlflow_logger import TrainMlflowLoggerCallback
+
 from .op_base import OperatorBase
 
 import typing
@@ -26,56 +28,55 @@ import mlflow
 from mlflow import MlflowClient
 from mlflow.pyfunc import PyFuncModel, PythonModel
 import datetime
+import ray
+from ray.runtime_env import RuntimeEnv
 
+import mlflow
 
 class MLOperator(OperatorBase):
     def init(self, *args, **kwargs):
         super().init(*args, **kwargs)
+        ray.shutdown()
         mlflow.set_tracking_uri(self.config.mlflow_url)
-        self.__model_id = f"pipeline-{self.get_pipeline_id()}_operator-{self.get_operator_id()}"
+        self.model_id = f"pipeline-{self.get_pipeline_id()}_operator-{self.get_operator_id()}"
+        mlflow.set_experiment(self.model_id)
         model = self.load_model()
         if model is None:
-            model = self.train(self.model)
-            if model is not None:
-                self.update_model(model)
-        
-        
-    def update_model(self, model: PythonModel):
-        # This will store the model at MLFlow model registry
-        # If it does not exist, it will be created with version 1
-        # All following models will increment the version by 1
-        # The latest version gets the alias `production`
+            self.__wrap_training()
+            
 
-        mlflow.end_run()
-        job_name = f"{self.__model_id}@{datetime.now().isoformat(timespec='microseconds')}"
-        mlflow.set_experiment(job_name)
-        run_relative_artifact_path = 'models'
+    def update_model(self, model: PythonModel):
+        if self.__run is None:
+            self.__start_run()
 
         # Create a new model version and save model
-        with mlflow.start_run(run_name="store-model") as run:
-            # mlflow.log_metrics(metrics) TODO
-            # mlflow.log_params(config) TODO
-
-            mlflow.pyfunc.log_model(
-                artifact_path=run_relative_artifact_path,
-                python_model=model,
-                # signature=signature TODO
-            )
-        
-        model_uri = f"runs:/{job_name}/{run_relative_artifact_path}"
        
-        created_model_version = mlflow.register_model(model_uri, job_name)
+        # mlflow.log_metrics(metrics) TODO
+        # mlflow.log_params(config) TODO
+
+        new_model = mlflow.pyfunc.log_model(
+            artifact_path=self.model_id,
+            python_model=model,
+            # signature=signature TODO
+        )
+
+        created_model_version = mlflow.register_model(new_model.model_uri, self.model_id)
         client = MlflowClient()
-        client.set_registered_model_alias(job_name, "production", created_model_version.version)
-        self.model = mlflow.pyfunc.load_model(f"models:/{self.__model_id}@production")
-        
+        client.set_registered_model_alias(
+            self.model_id, "production", created_model_version.version)
+        self.model = mlflow.pyfunc.load_model(
+            f"models:/{self.model_id}@production")
+        mlflow.end_run()
+        self.__run = None
+
     def load_model(self) -> typing.Optional[PyFuncModel]:
         try:
-            self.model = mlflow.pyfunc.load_model(f"models:/{self.__model_id}@production")
+            self.model = mlflow.pyfunc.load_model(
+                f"models:/{self.model_id}@production")
         except Exception:
             self.model = None
         return self.model
-        
+
     @abc.abstractmethod
     def infer(self, model: typing.Optional[PyFuncModel], data: typing.Dict[str, typing.Any], selector: str, device_id: str, timestamp: datetime.datetime) -> typing.Tuple[typing.Optional[typing.Any], typing.Optional[PythonModel]]:
         """
@@ -88,16 +89,16 @@ class MLOperator(OperatorBase):
         :return: Result data or None.
         """
         pass
-    
+
     @abc.abstractmethod
-    def train(self, model: typing.Optional[PyFuncModel]) -> typing.Optional[PythonModel]:
+    def train(self, model: typing.Optional[PyFuncModel], logger: TrainMlflowLoggerCallback) -> typing.Optional[PythonModel]:
         """
         Subclasses must override this method.
         :param model: The current model
         :return: Result data or None.
         """
         return None
-    
+
     @abc.abstractmethod
     def need_retraining(self, model: typing.Optional[PyFuncModel]) -> bool:
         """
@@ -106,13 +107,28 @@ class MLOperator(OperatorBase):
         :return: Result data or None.
         """
         return False
+    
+    def __start_run(self):
+        job_name = f"{self.model_id}@{datetime.datetime.now().isoformat(timespec='microseconds')}"
+        self.__run = mlflow.start_run(run_name=job_name)
+        self.__mlflow_logger = TrainMlflowLoggerCallback(self.config.mlflow_url, self.model_id, self.__run.info.run_name)
+    
+    def __wrap_training(self):
+        self.__start_run()
+        
+        ray.init(address=self.config.ray_url,
+                 runtime_env=RuntimeEnv(**self.config.ray_runtime_env))
+        model = self.train(self.model, self.__mlflow_logger)
+        ray.shutdown()
+        if model is not None:
+            self.update_model(model)
 
     def run(self, data: typing.Dict[str, typing.Any], selector: str, device_id: str, timestamp: datetime.datetime):
-        result, model = self.infer(self.model, data, selector, device_id, timestamp)
-        if model is not None: # TODO and not equal self.model
+        result, model = self.infer(
+            self.model, data, selector, device_id, timestamp)
+        if model is not None:  # TODO and not equal self.model
             self.update_model(model)
-        if self.need_retraining(self.model): # TODO reconsider checking on every message
-            model = self.train(self.model)
-            if model is not None:
-                self.update_model(model)
+        # TODO reconsider checking on every message
+        if self.need_retraining(self.model):
+            self.__wrap_training()
         return result

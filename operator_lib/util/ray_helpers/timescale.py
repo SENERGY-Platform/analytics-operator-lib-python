@@ -44,7 +44,8 @@ def get_timescale_dataset(conn_str: str, conf: InputTopic, duration: datetime.ti
             else:
                 time.sleep(duration)  # currently no data -> sleep for full duration
 
-    return ray.data.read_sql(query, lambda: __create_timescale_connection(conn_str))
+    ds = ray.data.read_sql(query, lambda: __create_timescale_connection(conn_str))
+    return ds
 
 
 def __quote_identifier(value: str) -> str:
