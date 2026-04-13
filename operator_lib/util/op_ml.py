@@ -111,7 +111,7 @@ class MLOperator(OperatorBase):
     def __start_run(self):
         job_name = f"{self.model_id}@{datetime.datetime.now().isoformat(timespec='microseconds')}"
         self.__run = mlflow.start_run(run_name=job_name)
-        self.__mlflow_logger = TrainMlflowLoggerCallback(self.config.mlflow_url, self.model_id, self.__run.info.run_name)
+        self.__mlflow_logger = TrainMlflowLoggerCallback(self.config.mlflow_url, self.model_id, self.__run.info.run_id)
     
     def __wrap_training(self):
         self.__start_run()

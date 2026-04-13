@@ -6,10 +6,10 @@ import mlflow
 from ray.train import Checkpoint, UserCallback
 
 class TrainMlflowLoggerCallback(UserCallback):
-    def __init__(self, tracking_uri: str, experiment_name: str, run_name: str):
+    def __init__(self, tracking_uri: str, experiment_name: str, run_id: str):
         self._tracking_uri = tracking_uri
         self._experiment_name = experiment_name
-        self._run_name = run_name
+        self._run_id = run_id
         self._started = False
 
     def _ensure_started(self):
@@ -17,7 +17,7 @@ class TrainMlflowLoggerCallback(UserCallback):
             return
         mlflow.set_tracking_uri(self._tracking_uri)
         mlflow.set_experiment(self._experiment_name)
-        # mlflow.start_run(run_name=self._run_name)
+        mlflow.start_run(run_id=self._run_id)
         self._started = True
 
     def _aggregate_metrics(self, worker_metrics: typing.List[typing.Dict[str, typing.Any]]) -> typing.Dict[str, float]:
