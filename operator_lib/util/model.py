@@ -35,7 +35,7 @@ class Config(simple_struct.Structure):
     mlflow_url = "http://mlflow-svc.mlflow.svc.cluster.local:5000"
     ray_url = "ray://cluster-kuberay-head-svc.ray.svc.cluster.local:10001"
     ray_runtime_env = {"working_dir": os.path.abspath(os.getcwd()), "pip": [
-        "git+https://github.com/SENERGY-Platform/analytics-operator-lib-python.git@a079317737d323a7c4c4addfbdc08ccae8423e97", "psutil"]}
+        "git+https://github.com/SENERGY-Platform/analytics-operator-lib-python.git@209e9ae016bbb13a41b178ae5e954f1884bdf710"]}
     ts_conn = "postgresql://postgres:tea@timescale-db.timescale.svc.cluster.local/postgres"
 
     def __init__(self, d, **kwargs):

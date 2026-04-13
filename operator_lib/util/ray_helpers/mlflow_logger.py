@@ -20,10 +20,10 @@ class TrainMlflowLogger(UserCallback):
         mlflow.set_experiment(self._experiment_name)
         active_run = mlflow.active_run()
         if active_run is None:
-            mlflow.start_run(run_id=self._run_id, log_system_metrics=True)
+            mlflow.start_run(run_id=self._run_id)
         elif active_run.info.run_id != self._run_id:
             mlflow.end_run(status="KILLED")
-            mlflow.start_run(run_id=self._run_id, log_system_metrics=True)
+            mlflow.start_run(run_id=self._run_id)
 
     def set_tags(self, tags: typing.Dict[str, typing.Any]):
         self._ensure_started()
