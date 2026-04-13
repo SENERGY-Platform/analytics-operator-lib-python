@@ -76,5 +76,5 @@ class TrainMlflowLogger(UserCallback):
         self.finish(status="FAILED")
 
     def finish(self, status: str = "FINISHED"):
-        if self._started and mlflow.active_run() is not None:
+        if mlflow.active_run() is not None:
             mlflow.end_run(status=status)
