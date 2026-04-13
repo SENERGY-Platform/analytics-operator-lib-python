@@ -10,15 +10,18 @@ class TrainMlflowLogger(UserCallback):
         self._tracking_uri = tracking_uri
         self._experiment_name = experiment_name
         self._run_id = run_id
-        self._started = False
 
     def _ensure_started(self):
-        if self._started:
-            return
+        # Ray callbacks are serialized across processes; a cached _started flag
+        # alone is not reliable. Reconcile against the actual active run.
         mlflow.set_tracking_uri(self._tracking_uri)
         mlflow.set_experiment(self._experiment_name)
-        mlflow.start_run(run_id=self._run_id)
-        self._started = True
+        active_run = mlflow.active_run()
+        if active_run is None:
+            mlflow.start_run(run_id=self._run_id)
+        elif active_run.info.run_id != self._run_id:
+            mlflow.end_run(status="KILLED")
+            mlflow.start_run(run_id=self._run_id)
 
     def set_tags(self, tags: typing.Dict[str, typing.Any]):
         self._ensure_started()
@@ -63,7 +66,7 @@ class TrainMlflowLogger(UserCallback):
             epoch_value = aggregated_metrics.get("epoch")
             if isinstance(epoch_value, numbers.Number):
                 step = int(epoch_value)
-            mlflow.log_metrics(aggregated_metrics, step=step)
+            self.log_metrics(aggregated_metrics, step=step)
 
         if checkpoint is not None:
             with checkpoint.as_directory() as checkpoint_dir:
@@ -75,4 +78,3 @@ class TrainMlflowLogger(UserCallback):
     def finish(self, status: str = "FINISHED"):
         if self._started and mlflow.active_run() is not None:
             mlflow.end_run(status=status)
-        self._started = False
