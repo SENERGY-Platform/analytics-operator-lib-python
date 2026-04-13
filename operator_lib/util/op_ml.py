@@ -16,7 +16,7 @@
 
 __all__ = ("MLOperator",)
 
-from .ray_helpers.mlflow_logger import TrainMlflowLogger
+from .helpers.mlflow_logger import TrainMlflowLogger
 
 from .op_base import OperatorBase
 
@@ -46,26 +46,26 @@ class MLOperator(OperatorBase):
             
 
     def update_model(self, model: PythonModel):
-        if self.__run is None:
-            self.__start_run()
-
-        # Create a new model version and save model
-       
-        # mlflow.log_metrics(metrics) TODO
-        # mlflow.log_params(config) TODO
-
-        new_model = mlflow.pyfunc.log_model(
-            artifact_path=self.model_id,
-            python_model=model,
-            # signature=signature TODO
-        )
-
-        created_model_version = mlflow.register_model(new_model.model_uri, self.model_id)
-        client = MlflowClient()
-        client.set_registered_model_alias(
-            self.model_id, "production", created_model_version.version)
-        self.model = mlflow.pyfunc.load_model(
-            f"models:/{self.model_id}@production")
+        with self.__mlflow_logger.trace("update_model"):
+            if self.__run is None:
+                self.__start_run()
+    
+            with self.__mlflow_logger.trace("log model"):
+                new_model = mlflow.pyfunc.log_model(
+                    artifact_path=self.model_id,
+                    python_model=model,
+                )
+            with self.__mlflow_logger.trace("register model"):
+                created_model_version = mlflow.register_model(new_model.model_uri, self.model_id)
+                
+            with self.__mlflow_logger.trace("set alias"):
+                client = MlflowClient()
+                client.set_registered_model_alias(
+                    self.model_id, "production", created_model_version.version)
+                
+            with self.__mlflow_logger.trace("update local model"):
+                self.model = mlflow.pyfunc.load_model(
+                    f"models:/{self.model_id}@production")
         mlflow.end_run()
         self.__run = None
 
@@ -118,7 +118,8 @@ class MLOperator(OperatorBase):
         
         ray.init(address=self.config.ray_url,
                  runtime_env=RuntimeEnv(**self.config.ray_runtime_env))
-        model = self.train(self.model, self.__mlflow_logger)
+        with self.__mlflow_logger.trace("train"):
+            model = self.train(self.model, self.__mlflow_logger)
         ray.shutdown()
         if model is not None:
             self.update_model(model)
