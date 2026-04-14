@@ -35,7 +35,7 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
     cutoff = now - duration
     filter = gen_identifiers(name=input_topic.name, f_type=input_topic.filterType,
                                        f_value=input_topic.filterValue, pipeline_id=pipeline_id)
-    print(f"Filtering for {json.dumps(filter, indent=2)}") # TODO use logger
+    print(f"Filtering topic {input_topic.name} for {json.dumps(filter, indent=2)}") # TODO use logger
 
     def __filter_kafka_msg(msg: dict) -> bool:
         msg_timestamp = datetime.datetime.fromtimestamp(msg["timestamp"] / 1000.0)
