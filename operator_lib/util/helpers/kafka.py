@@ -48,5 +48,5 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
                 return False
         return True        
     
-    return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name).filter(__filter_kafka_msg), cutoff
+    return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=15*60*1000).filter(__filter_kafka_msg), cutoff
     
