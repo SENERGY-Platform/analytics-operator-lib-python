@@ -8,6 +8,8 @@ import typing
 
 @ray.remote
 def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:
+    KafkaDatasource.
+    
     if input_topic.filterType == "OperatorId":
         for m in input_topic.mappings:
             if not m.source.startswith("analytics."):
@@ -94,5 +96,5 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
                 return False
         return True        
         
-    return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=24*60*60*1000).filter(__filter_kafka_msg), cutoff
+    return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=24*60*60*1000, override_num_blocks=10).filter(__filter_kafka_msg), cutoff
     
