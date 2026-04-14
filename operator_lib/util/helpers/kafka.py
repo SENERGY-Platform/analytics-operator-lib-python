@@ -30,7 +30,7 @@ def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str,
     
     ds = ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name).filter(__filter_kafka_msg)
     if require_full_duration:
-        msg = ds.take(1)
+        msg = ds.take(1)[0]
         msg_timestamp = datetime.datetime.fromtimestamp(msg["timestamp"] / 1000.0)
         time.sleep(max(0, (cutoff - msg_timestamp).total_seconds()))
     return ds
