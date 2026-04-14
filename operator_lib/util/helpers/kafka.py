@@ -14,7 +14,7 @@ def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str,
             msg = ds.take(1)
             if len(msg) == 0:
                 print(f"No messages found in Kafka, sleeping for {duration} before retrying...") # TODO use logger
-                time.sleep(duration)
+                time.sleep(duration.total_seconds())
                 continue
             msg_timestamp = datetime.datetime.fromtimestamp(msg[0]["timestamp"] / 1000.0)
             sleep_for = (cutoff - msg_timestamp).total_seconds()
@@ -44,6 +44,7 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
         payload = json.loads(msg["value"])
         for f in filter:
             if payload.get(f["key"]) != f["value"]:
+                print(f"Message {json.dumps(msg, indent=2)} does not match filter {json.dumps(f, indent=2)}") # TODO use logger
                 return False
         return True        
     
