@@ -4,6 +4,7 @@ import datetime
 from operator_lib.util.model import InputTopic
 import time
 import typing
+from ray.data.expressions import col
 
 
 @ray.remote
@@ -95,6 +96,10 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
                 print(f"Filtering out message with value {payload} because it does not match filter {f}") # TODO remove
                 return False
         return True        
+    
+    expr = (col("timestamp") > cutoff.timestamp() * 1000)
+    for f in filter:
+        expr = expr & (col("value").struct[f["key"]] == f["value"])
         
-    return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=24*60*60*1000, override_num_blocks=10, end_offset=12001388, start_offset=12000000).filter(__filter_kafka_msg), cutoff # TODO for speeding up debugging
+    return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=24*60*60*1000, override_num_blocks=10, end_offset=12001388, start_offset=12000000).filter(expr=expr), cutoff # TODO for speeding up debugging
     
