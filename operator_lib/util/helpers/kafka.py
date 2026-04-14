@@ -96,5 +96,5 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
                 return False
         return True        
         
-    return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=24*60*60*1000, override_num_blocks=10, end_offset=1000).filter(__filter_kafka_msg), cutoff # TODO for speeding up debugging
+    return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=24*60*60*1000, override_num_blocks=10, end_offset=12001388, start_offset=12000000).filter(__filter_kafka_msg), cutoff # TODO for speeding up debugging
     

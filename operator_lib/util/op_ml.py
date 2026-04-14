@@ -124,11 +124,12 @@ class MLOperator(OperatorBase):
 
         ray.init(address=self.config.ray_url,
                  runtime_env=RuntimeEnv(**self.config.ray_runtime_env),
-                 log_to_driver=False,
-                 logging_config=ray.LoggingConfig(
-                     encoding="JSON",
-                     log_level="INFO",
-                 ))
+            #     log_to_driver=True, # TODO
+            #     logging_config=ray.LoggingConfig(
+            #         encoding="JSON",
+            #         log_level="INFO",
+            #     )
+        )
         with self.__mlflow_logger.trace("train"):
             model = self.train(self.model, self.__mlflow_logger)
         ray.shutdown()
