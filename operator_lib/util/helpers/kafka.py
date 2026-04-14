@@ -17,14 +17,15 @@ def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str,
     cutoff = now - duration
     filter = gen_identifiers(name=input_topic.name, f_type=input_topic.filterType,
                                        f_value=input_topic.filterValue, pipeline_id=pipeline_id)
-    filter_key = filter[0]["key"]
-    filter_value = filter[0]["value"]
 
     def __filter_kafka_msg(msg: dict) -> bool:
         if datetime.datetime.fromtimestamp(msg["timestamp"]) < cutoff:
             return False        
-        return json.loads(msg["value"])[filter_key] == filter_value
-        
+        payload = json.loads(msg["value"])
+        for f in filter:
+            if payload.get(f["key"]) != f["value"]:
+                return False
+        return True        
     
     ds = ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name).filter(__filter_kafka_msg)
     if require_full_duration:
