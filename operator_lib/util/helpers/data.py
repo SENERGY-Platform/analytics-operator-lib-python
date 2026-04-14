@@ -9,8 +9,11 @@ import json
 
 ALWAYS_PREFER_KAFKA = True # TODO
 
-# TODO add documentation. highlight that require_full_duration can lead to long waiting times and should only be used if strictly necessary. hint that retraining might be a good alternative.
 def provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False) -> typing.List[ray.ObjectRef[ray.data.Dataset]]:
+    """
+    This method can be used in the train method of your model to get historic data from the input topics. It will return a list of datasets, one for each input topic. The datasets will contain data from the specified duration time. If require_full_duration is set to True, the method will wait until it can provide data for the full duration. This can lead to long waiting times if there is not enough data in the input topics. Therefore, it should only be used if strictly necessary. It is genreally recommended to train with the available data and use the need_retraining method to trigger retraining if more data is available.
+    """
+    
     ds: typing.List[ray.ObjectRef[ray.data.Dataset]] = []
     dep_config = util.DeploymentConfig()
     config_json = json.loads(dep_config.config)

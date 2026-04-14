@@ -18,7 +18,7 @@ def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str,
             msg = ds.take(1)
             if len(msg) == 0:
                 sleep_for = min(duration.total_seconds(), 15 * 60)
-                print(f"No messages found in Kafka, sleeping for {sleep_for} before retrying...") # TODO use logger
+                print(f"No messages found in Kafka, sleeping for {sleep_for} before retrying...")
                 time.sleep(sleep_for)
                 continue
             msg_timestamp = datetime.datetime.fromtimestamp(msg[0]["timestamp"] / 1000.0)
@@ -52,6 +52,8 @@ def __map_kafka_batch(batch, mappings: typing.List):
         result[dest] = [__extract_json_path(payload, source_path) for payload in payloads]
 
     frame = pd.DataFrame(result)
+    print(f"Mapped Kafka frame shape={frame.shape}\n{frame.head(10).to_string(index=False)}") # TODO remove
+    
     if mapped_columns:
         frame = frame.dropna(subset=mapped_columns, how="all")
     return frame
@@ -82,7 +84,6 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
     cutoff = now - duration
     filter = gen_identifiers(name=input_topic.name, f_type=input_topic.filterType,
                                        f_value=input_topic.filterValue, pipeline_id=pipeline_id)
-    print(f"Filtering topic {input_topic.name} for {json.dumps(filter, indent=2)}") # TODO use logger
 
     def __filter_kafka_msg(msg: dict) -> bool:
         msg_timestamp = datetime.datetime.fromtimestamp(msg["timestamp"] / 1000.0)
@@ -91,8 +92,9 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
         payload = json.loads(msg["value"])
         for f in filter:
             if payload.get(f["key"]) != f["value"]:
+                print(f"Filtering out message with value {payload} because it does not match filter {f}") # TODO remove
                 return False
         return True        
         
-    return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=24*60*60*1000, override_num_blocks=10).filter(__filter_kafka_msg), cutoff
+    return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=24*60*60*1000, override_num_blocks=10, end_offset=1000).filter(__filter_kafka_msg), cutoff # TODO for speeding up debugging
     
