@@ -37,6 +37,7 @@ def __map_kafka_batch(batch, mappings: typing.List):
     }
 
     payloads = [json.loads(v) for v in batch["value"]]
+    mapped_columns = []
 
     for mapping in mappings:
         source_path = str(mapping.source or "")
@@ -46,9 +47,14 @@ def __map_kafka_batch(batch, mappings: typing.List):
         elif source_path == "value":
             source_path = ""
 
-        result[str(mapping.dest)] = [__extract_json_path(payload, source_path) for payload in payloads]
+        dest = str(mapping.dest)
+        mapped_columns.append(dest)
+        result[dest] = [__extract_json_path(payload, source_path) for payload in payloads]
 
-    return pd.DataFrame(result)
+    frame = pd.DataFrame(result)
+    if mapped_columns:
+        frame = frame.dropna(subset=mapped_columns, how="all")
+    return frame
 
 
 def __extract_json_path(payload: typing.Any, path: str) -> typing.Any:
