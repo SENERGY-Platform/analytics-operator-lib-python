@@ -17,22 +17,26 @@ def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str,
         if require_full_duration:
             msg = ds.take(1)
             if len(msg) == 0:
-                print(f"No messages found in Kafka, sleeping for {duration} before retrying...") # TODO use logger
-                time.sleep(duration.total_seconds())
+                sleep_for = min(duration.total_seconds(), 15 * 60)
+                print(f"No messages found in Kafka, sleeping for {sleep_for} before retrying...") # TODO use logger
+                time.sleep(sleep_for)
                 continue
             msg_timestamp = datetime.datetime.fromtimestamp(msg[0]["timestamp"] / 1000.0)
-            sleep_for = (cutoff - msg_timestamp).total_seconds()
+            sleep_for = min((cutoff - msg_timestamp).total_seconds(), 15 * 60)
             if sleep_for > 0:
                 time.sleep(sleep_for)
                 continue
-        return ds.map(lambda batch: __map_kafka_batch(batch, input_topic.mappings))
+        return ds.map_batches(lambda batch: __map_kafka_batch(batch, input_topic.mappings), batch_format="pandas")
 
 
-def __map_kafka_batch(msg: dict, mappings: typing.List) -> dict:
-    payload = json.loads(msg["value"])
+def __map_kafka_batch(batch, mappings: typing.List):
+    import pandas as pd
+
     result = {
-        "time": datetime.datetime.fromtimestamp(msg["timestamp"] / 1000.0)
+        "time": pd.to_datetime(batch["timestamp"] / 1000.0, unit="s", utc=True).dt.tz_localize(None)
     }
+
+    payloads = [json.loads(v) for v in batch["value"]]
 
     for mapping in mappings:
         source_path = str(mapping.source or "")
@@ -42,9 +46,9 @@ def __map_kafka_batch(msg: dict, mappings: typing.List) -> dict:
         elif source_path == "value":
             source_path = ""
 
-        result[str(mapping.dest)] = __extract_json_path(payload, source_path)
+        result[str(mapping.dest)] = [__extract_json_path(payload, source_path) for payload in payloads]
 
-    return result
+    return pd.DataFrame(result)
 
 
 def __extract_json_path(payload: typing.Any, path: str) -> typing.Any:
@@ -84,5 +88,5 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
                 return False
         return True        
         
-    return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=15*60*1000).filter(__filter_kafka_msg), cutoff
+    return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=24*60*60*1000).filter(__filter_kafka_msg), cutoff
     

@@ -7,8 +7,9 @@ from operator_lib.util.helpers.kafka import get_kafka_dataset
 
 import json
 
-ALWAYS_PREFER_KAFKA = True
+ALWAYS_PREFER_KAFKA = True # TODO
 
+# TODO add documentation. highlight that require_full_duration can lead to long waiting times and should only be used if strictly necessary. hint that retraining might be a good alternative.
 def provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False) -> typing.List[ray.ObjectRef[ray.data.Dataset]]:
     ds: typing.List[ray.ObjectRef[ray.data.Dataset]] = []
     dep_config = util.DeploymentConfig()
