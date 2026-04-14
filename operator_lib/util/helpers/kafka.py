@@ -8,6 +8,10 @@ import typing
 
 @ray.remote
 def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:
+    if input_topic.filterType == "OperatorId":
+        for m in input_topic.mappings:
+            if not m.source.startswith("analytics."):
+                m.source = f"analytics.{m.source}"
     while True:
         ds, cutoff = __get_kafka_dataset(bootstrap, input_topic, pipeline_id, duration)
         if require_full_duration:
@@ -21,7 +25,40 @@ def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str,
             if sleep_for > 0:
                 time.sleep(sleep_for)
                 continue
-        return ds
+        return ds.map(lambda batch: __map_kafka_batch(batch, input_topic.mappings))
+
+
+def __map_kafka_batch(msg: dict, mappings: typing.List) -> dict:
+    payload = json.loads(msg["value"])
+    result = {
+        "time": datetime.datetime.fromtimestamp(msg["timestamp"] / 1000.0)
+    }
+
+    for mapping in mappings:
+        source_path = str(mapping.source or "")
+        # Paths are configured like "value.sensor" where "value" references the message payload root.
+        if source_path.startswith("value."):
+            source_path = source_path[len("value."):]
+        elif source_path == "value":
+            source_path = ""
+
+        result[str(mapping.dest)] = __extract_json_path(payload, source_path)
+
+    return result
+
+
+def __extract_json_path(payload: typing.Any, path: str) -> typing.Any:
+    if not path:
+        return payload
+
+    current = payload
+    for segment in path.split("."):
+        if not isinstance(current, dict):
+            return None
+        current = current.get(segment)
+        if current is None:
+            return None
+    return current
 
 
 def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta) -> typing.Tuple[ray.data.Dataset, datetime.datetime]:
@@ -44,9 +81,8 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
         payload = json.loads(msg["value"])
         for f in filter:
             if payload.get(f["key"]) != f["value"]:
-                print(f"Message {json.dumps(msg, indent=2)} does not match filter {json.dumps(f, indent=2)}") # TODO use logger
                 return False
         return True        
-    
+        
     return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=15*60*1000).filter(__filter_kafka_msg), cutoff
     
