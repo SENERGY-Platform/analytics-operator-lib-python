@@ -7,9 +7,7 @@ import typing
 
 
 @ray.remote
-def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:
-    KafkaDatasource.
-    
+def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:    
     if input_topic.filterType == "OperatorId":
         for m in input_topic.mappings:
             if not m.source.startswith("analytics."):
