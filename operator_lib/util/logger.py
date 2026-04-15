@@ -36,14 +36,27 @@ class LoggerError(Exception):
 logging.setLoggerClass(structlog.Logger)
 logger = logging.getLogger("operator")
 logger.propagate = False
-logger.addHandler(logging.StreamHandler())
+
+_json_formatter = logging.Formatter('%(message)s')
+_handler = logging.StreamHandler()
+_handler.setFormatter(_json_formatter)
+logger.addHandler(_handler)
 
 
-def init_logger(level):
+def init_logger(level, project_name="OperatorLib"):
     if level == "":
         level = "warning"
     if level not in logging_levels.keys():
         raise LoggerError(level)
+    logger.configure(organization_name='github.com/SENERGY-Platform', project_name=project_name, time_utc=True, logger_name=True)
     log_level = logging_levels[level]
     logger.setLevel(log_level)
-    logging.basicConfig(stream=sys.stdout, level=log_level)
+    root = logging.getLogger()
+    root.setLevel(log_level)
+    if not root.handlers:
+        h = logging.StreamHandler(sys.stdout)
+        h.setFormatter(_json_formatter)
+        root.addHandler(h)
+    else:
+        for h in root.handlers:
+            h.setFormatter(_json_formatter)
