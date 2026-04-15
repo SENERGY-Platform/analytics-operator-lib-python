@@ -123,9 +123,11 @@ class MLOperator(OperatorBase):
         self.__start_run()
 
         with self.__mlflow_logger.trace("ray init"):
-            logger.debug(f"Initializing Ray with config: {self.config.ray_runtime_env}. This might take a while...")
+            logger.debug(
+                f"Initializing Ray with config: {self.config.ray_runtime_env}. This might take a while, even if you see log messages below...")
             ray.init(address=self.config.ray_url,
-                    runtime_env=RuntimeEnv(**self.config.ray_runtime_env))
+                     runtime_env=RuntimeEnv(**self.config.ray_runtime_env)
+                     )
         with self.__mlflow_logger.trace("train"):
             model = self.train(self.model, self.__mlflow_logger)
         ray.shutdown()
