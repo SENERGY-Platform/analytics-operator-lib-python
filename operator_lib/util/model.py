@@ -45,12 +45,15 @@ class Config(simple_struct.Structure):
         "config": {
             "setup_timeout_seconds": 30 * 60,
         },
-        "py_executable": "uv run",
+        "working_dir": "."
     }
+    """
+    TODO
     try:
         ray_runtime_env["working_dir"] = os.path.abspath(os.getcwd())
     except FileNotFoundError:
         pass # Happens in ray remote environments
+    """
     ts_conn = "postgresql://postgres:tea@timescale-db.timescale.svc.cluster.local/postgres"
 
     def __init__(self, d, **kwargs):
