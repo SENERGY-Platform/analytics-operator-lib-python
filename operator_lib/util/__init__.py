@@ -14,6 +14,8 @@
    limitations under the License.
 """
 
+import os
+
 from .config import *
 from .logger import *
 from .model import *
@@ -33,7 +35,7 @@ from copy import deepcopy
 def print_init(name, git_info_file):
     lines = list()
     l_len = len(name)
-    if git_info_file is not None:
+    if git_info_file is not None and os.path.isfile(git_info_file):
         with open(git_info_file, "r") as file:
             for line in file:
                 key, value = line.strip().split("=")
