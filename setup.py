@@ -51,7 +51,7 @@ setuptools.setup(
         'ray[data]==2.54.1',
         'ray[client]==2.54.1',
         'psycopg2-binary==2.9.11',
-        'structlog @ git+https://github.com/SENERGY-Platform/python-structlog.git@e860b71b792dad610fa7540e02746e11f5d16b09'
+        'structlog @ git+https://github.com/SENERGY-Platform/python-structlog.git@0.2.2'
     ],
     packages=setuptools.find_packages(),
     python_requires='>=3.5.3',

@@ -72,7 +72,18 @@ def __map_kafka_batch(batch, mappings: typing.List):
         "time": pd.to_datetime(batch["timestamp"] / 1000.0, unit="s", utc=True).dt.tz_localize(None)
     }
 
-    payloads = [json.loads(v) for v in batch["value"]]
+    # Parse Kafka values - handle both string and bytes
+    payloads = []
+    for v in batch["value"]:
+        try:
+            if isinstance(v, bytes):
+                v = v.decode('utf-8')
+            payload = json.loads(v)
+            payloads.append(payload)
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            print(f"Error parsing JSON from Kafka value: {e}, raw value: {v}")
+            payloads.append(None)
+    
     mapped_columns = []
 
     for mapping in mappings:
@@ -85,10 +96,11 @@ def __map_kafka_batch(batch, mappings: typing.List):
 
         dest = str(mapping.dest)
         mapped_columns.append(dest)
-        result[dest] = [__extract_json_path(payload, source_path) for payload in payloads]
+        result[dest] = [__extract_json_path(payload, source_path) if payload is not None else None for payload in payloads]
 
     frame = pd.DataFrame(result)
-    print(f"Mapped Kafka frame shape={frame.shape}\n{frame.head(10).to_string(index=False)}") # TODO remove
+    print(f"Mapped Kafka frame shape={frame.shape}\n{frame.head(10).to_string(index=False)}")
+    print(f"Sample payloads parsed: {payloads[:2] if payloads else 'No payloads'}")
     
     if mapped_columns:
         frame = frame.dropna(subset=mapped_columns, how="all")
