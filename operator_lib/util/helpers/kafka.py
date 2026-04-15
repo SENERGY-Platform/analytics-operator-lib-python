@@ -4,7 +4,42 @@ import datetime
 from operator_lib.util.model import InputTopic
 import time
 import typing
-from ray.data.expressions import col
+from ray.data.expressions import col, udf, DataType
+import pyarrow.compute as pc
+import pyarrow as pa
+
+
+@udf(return_dtype=DataType.string())
+def json_get(value_col, key: str):
+    """Extract a value from JSON-encoded binary/string data.
+    
+    Args:
+        value_col: PyArrow array of binary or string (JSON-encoded) data
+        key: The key to extract from the JSON object
+    
+    Returns:
+        PyArrow array of extracted values as strings
+    """
+    import json
+    
+    results = []
+    for val in value_col:
+        try:
+            if val is None:
+                results.append(None)
+            else:
+                # Decode bytes to string if needed
+                if isinstance(val.as_py(), bytes):
+                    json_str = val.as_py().decode('utf-8')
+                else:
+                    json_str = val.as_py()
+                
+                data = json.loads(json_str)
+                results.append(str(data.get(key)))
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            results.append(None)
+    
+    return pa.array(results, type=pa.string())
 
 
 @ray.remote
@@ -86,20 +121,10 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
     filter = gen_identifiers(name=input_topic.name, f_type=input_topic.filterType,
                                        f_value=input_topic.filterValue, pipeline_id=pipeline_id)
 
-    def __filter_kafka_msg(msg: dict) -> bool:
-        msg_timestamp = datetime.datetime.fromtimestamp(msg["timestamp"] / 1000.0)
-        if msg_timestamp < cutoff:
-            return False        
-        payload = json.loads(msg["value"])
-        for f in filter:
-            if payload.get(f["key"]) != f["value"]:
-                print(f"Filtering out message with value {payload} because it does not match filter {f}") # TODO remove
-                return False
-        return True        
-    
+    # Build expression-based filter for performance
     expr = (col("timestamp") > cutoff.timestamp() * 1000)
     for f in filter:
-        expr = expr & (col("value").struct[f["key"]] == f["value"])
+        expr = expr & (json_get(col("value"), f["key"]) == f["value"])
         
     return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=24*60*60*1000, override_num_blocks=10, end_offset=12001388, start_offset=12000000).filter(expr=expr), cutoff # TODO for speeding up debugging
     
