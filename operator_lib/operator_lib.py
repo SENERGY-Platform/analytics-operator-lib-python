@@ -38,29 +38,16 @@ class OperatorLib:
         util.logger.debug(f"deployment config: {dep_config}")
         util.logger.debug(f"operator config: {opr_config}")
         filter_handler = util.create_filter_handler(opr_config.inputTopics, dep_config.pipeline_id, operator.selectors)
-        if dep_config.config_bootstrap_servers is None:
-            util.logger.info(f"Using Zookeeper for kafka broker lookup: {dep_config.zk_quorum}")
-            kafka_brokers = ",".join(util.get_kafka_brokers(zk_hosts=dep_config.zk_quorum, zk_path=dep_config.zk_brokers_path))
-            kafka_consumer_config = {
-                "metadata.broker.list": kafka_brokers,
-                "group.id": dep_config.config_application_id,
-                "auto.offset.reset": dep_config.consumer_auto_offset_reset_config,
-                "max.poll.interval.ms": 6000000
-            }
-            kafka_producer_config = {
-                "metadata.broker.list": kafka_brokers,
-            }
-        else:
-            util.logger.info(f"Directly bootstrapping kafka: {dep_config.config_bootstrap_servers}")
-            kafka_consumer_config = {
-                'bootstrap.servers': dep_config.config_bootstrap_servers,
-                "group.id": dep_config.config_application_id,
-                "auto.offset.reset": dep_config.consumer_auto_offset_reset_config,
-                "max.poll.interval.ms": 6000000
-            }
-            kafka_producer_config = {
-                'bootstrap.servers': dep_config.config_bootstrap_servers,
-            }
+        util.logger.info(f"Directly bootstrapping kafka: {dep_config.config_bootstrap_servers}")
+        kafka_consumer_config = {
+            'bootstrap.servers': dep_config.config_bootstrap_servers,
+            "group.id": dep_config.config_application_id,
+            "auto.offset.reset": dep_config.consumer_auto_offset_reset_config,
+            "max.poll.interval.ms": 6000000
+        }
+        kafka_producer_config = {
+            'bootstrap.servers': dep_config.config_bootstrap_servers,
+        }
         if dep_config.metrics:
             util.logger.info(f"Launching with metrics server on port {dep_config.metrics_port}")
             kafka_consumer_config["statistics.interval.ms"] = 30000

@@ -17,7 +17,8 @@
 __all__ = ("logger", "init_logger")
 
 import logging
-import sys 
+import sys
+import structlog
 
 logging_levels = {
     'info': logging.INFO,
@@ -32,13 +33,10 @@ class LoggerError(Exception):
     def __init__(self, arg):
         super().__init__(f"unknown log level '{arg}'")
 
-
-handler = logging.StreamHandler()
-handler.setFormatter(logging.Formatter(fmt="%(levelname)s: %(message)s"))
-
+logging.setLoggerClass(structlog.Logger)
 logger = logging.getLogger("operator")
 logger.propagate = False
-logger.addHandler(handler)
+logger.addHandler(logging.StreamHandler())
 
 
 def init_logger(level):

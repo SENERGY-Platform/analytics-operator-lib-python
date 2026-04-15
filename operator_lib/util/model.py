@@ -35,7 +35,7 @@ class Config(simple_struct.Structure):
     mlflow_url = "http://mlflow-svc.mlflow.svc.cluster.local:5000"
     ray_url = "ray://cluster-kuberay-head-svc.ray.svc.cluster.local:10001"
     ray_runtime_env = {"working_dir": os.path.abspath(os.getcwd()), "pip": [
-        "git+https://github.com/SENERGY-Platform/analytics-operator-lib-python.git@5465f7a7dc5bc043af74638f398b8fdd39d66032", "kafka-python[snappy]"]}
+        "git+https://github.com/SENERGY-Platform/analytics-operator-lib-python.git@9d39ff413a196545e2ba6c74638bd3a83fa5df11", "kafka-python[snappy]"]}
     ts_conn = "postgresql://postgres:tea@timescale-db.timescale.svc.cluster.local/postgres"
 
     def __init__(self, d, **kwargs):

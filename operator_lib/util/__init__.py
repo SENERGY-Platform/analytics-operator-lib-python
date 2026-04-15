@@ -23,8 +23,7 @@ from .init_phase import *
 from .timestamps import *
 from .start_time import *
 import math
-import kazoo.client
-import json
+
 import typing
 import hashlib
 
@@ -50,19 +49,6 @@ def print_init(name, git_info_file):
     for line in lines:
         print(line)
     print("*" * l_len)
-
-
-def get_kafka_brokers(zk_hosts: str, zk_path: str):
-    zk_client = kazoo.client.KazooClient(hosts=zk_hosts)
-    zk_client.start()
-    brokers = list()
-    for id in zk_client.get_children(zk_path):
-        data, _ = zk_client.get(f"{zk_path}/{id}")
-        data = json.loads(data)
-        brokers.append(f"{data['host']}:{data['port']}")
-    zk_client.stop()
-    return brokers
-
 
 def gen_identifiers(name: str, f_type: str, f_value: str, pipeline_id: str):
     if f_type == "DeviceId":
