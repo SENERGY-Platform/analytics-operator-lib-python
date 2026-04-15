@@ -123,13 +123,7 @@ class MLOperator(OperatorBase):
         self.__start_run()
 
         ray.init(address=self.config.ray_url,
-                 runtime_env=RuntimeEnv(**self.config.ray_runtime_env),
-            #     log_to_driver=True, # TODO
-            #     logging_config=ray.LoggingConfig(
-            #         encoding="JSON",
-            #         log_level="INFO",
-            #     )
-        )
+                 runtime_env=RuntimeEnv(**self.config.ray_runtime_env))
         with self.__mlflow_logger.trace("train"):
             model = self.train(self.model, self.__mlflow_logger)
         ray.shutdown()
@@ -139,7 +133,7 @@ class MLOperator(OperatorBase):
     def run(self, data: typing.Dict[str, typing.Any], selector: str, device_id: str, timestamp: datetime.datetime):
         """
         The method will be called by the Operator Lib. It should not be called or overridden by subclasses. Subclasses should implement the infer and train method to provide ML functionality.
-        """        
+        """
         result, model = self.infer(
             self.model, data, selector, device_id, timestamp)
         if model is not None:
