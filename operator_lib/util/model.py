@@ -46,7 +46,6 @@ class Config(simple_struct.Structure):
             "setup_timeout_seconds": 30 * 60,
         },
         "working_dir": ".",
-        "uv": "uv.lock",
     }
     """
     TODO
