@@ -88,19 +88,13 @@ def __map_kafka_batch(batch, mappings: typing.List):
 
     for mapping in mappings:
         source_path = str(mapping.source or "")
-        # Paths are configured like "value.sensor" where "value" references the message payload root.
-        if source_path.startswith("value."):
-            source_path = source_path[len("value."):]
-        elif source_path == "value":
-            source_path = ""
-
         dest = str(mapping.dest)
         mapped_columns.append(dest)
         result[dest] = [__extract_json_path(payload, source_path) if payload is not None else None for payload in payloads]
 
     frame = pd.DataFrame(result)
-    print(f"Mapped Kafka frame shape={frame.shape}\n{frame.head(10).to_string(index=False)}")
-    print(f"Sample payloads parsed: {payloads[:2] if payloads else 'No payloads'}")
+    print(f"Mapped Kafka frame shape={frame.shape}\n{frame.head(2).to_string(index=False)}") # TODO remove debug log
+    print(f"Sample payloads parsed: {payloads[:2] if payloads else 'No payloads'}") # TODO remove debug log
     
     if mapped_columns:
         frame = frame.dropna(subset=mapped_columns, how="all")

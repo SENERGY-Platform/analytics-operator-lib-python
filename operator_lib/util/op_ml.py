@@ -19,6 +19,7 @@ __all__ = ("MLOperator",)
 from .helpers.mlflow_logger import TrainMlflowLogger
 
 from .op_base import OperatorBase
+from operator_lib.util.logger import logger
 
 import typing
 import datetime
@@ -30,7 +31,6 @@ from mlflow.pyfunc import PyFuncModel, PythonModel
 import datetime
 import ray
 from ray.runtime_env import RuntimeEnv
-
 import mlflow
 
 
@@ -122,8 +122,10 @@ class MLOperator(OperatorBase):
     def __wrap_training(self):
         self.__start_run()
 
-        ray.init(address=self.config.ray_url,
-                 runtime_env=RuntimeEnv(**self.config.ray_runtime_env))
+        with self.__mlflow_logger.trace("ray init"):
+            logger.debug(f"Initializing Ray with config: {self.config.ray_runtime_env}. This might take a while...")
+            ray.init(address=self.config.ray_url,
+                    runtime_env=RuntimeEnv(**self.config.ray_runtime_env))
         with self.__mlflow_logger.trace("train"):
             model = self.train(self.model, self.__mlflow_logger)
         ray.shutdown()
