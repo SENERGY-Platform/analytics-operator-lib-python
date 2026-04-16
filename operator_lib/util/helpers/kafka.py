@@ -58,7 +58,10 @@ def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str,
                 time.sleep(sleep_for)
                 continue
             msg_timestamp = datetime.datetime.fromtimestamp(msg[0]["timestamp"] / 1000.0)
-            sleep_for = min((cutoff - msg_timestamp).total_seconds(), 15 * 60)
+            offset = cutoff - msg_timestamp
+            if offset < duration / 10:
+                return ds.map_batches(lambda batch: __map_kafka_batch(batch, input_topic.mappings), batch_format="pandas")
+            sleep_for = min((offset).total_seconds(), 15 * 60)
             if sleep_for > 0:
                 time.sleep(sleep_for)
                 continue
@@ -126,8 +129,16 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
                                        f_value=input_topic.filterValue, pipeline_id=pipeline_id)
 
     # Build expression-based filter for performance
-    expr = (col("timestamp") > cutoff.timestamp() * 1000)
+    expressions = []
     for f in filter:
-        expr = expr & (json_get(col("value"), f["key"]) == f["value"])
+        expressions.append((json_get(col("value"), f["key"]) == f["value"]))
         
-    return ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=24*60*60*1000, override_num_blocks=10).filter(expr=expr), cutoff
+    ds = ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=24*60*60*1000, override_num_blocks=10, start_offset=cutoff)
+    if len(expressions) == 0:
+        return ds, cutoff
+    
+    expr = expressions[0]
+    for e in expressions[1:]:
+        expr = expr & e
+        
+    return ds.filter(expr=expr), cutoff
