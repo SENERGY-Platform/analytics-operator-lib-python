@@ -5,7 +5,6 @@ from operator_lib.util.model import InputTopic
 import time
 import typing
 from ray.data.expressions import col, udf, DataType
-import pyarrow.compute as pc
 import pyarrow as pa
 
 

@@ -7,7 +7,7 @@ from operator_lib.util.helpers.kafka import get_kafka_dataset
 
 import json
 
-ALWAYS_PREFER_KAFKA = True # TODO
+ALWAYS_PREFER_KAFKA = False # Can be used to debug kafka data source
 
 def provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False) -> typing.List[ray.ObjectRef[ray.data.Dataset]]:
     """
