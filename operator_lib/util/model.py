@@ -38,7 +38,6 @@ class Config(simple_struct.Structure):
         TODO 
         "uv": [
             "git+https://github.com/SENERGY-Platform/analytics-operator-lib-python.git@d7f6fe87f7f79ce27b3271679e1ae526043dcad7",
-            "kafka-python[snappy]",
         ],
     """
     ray_runtime_env = {
