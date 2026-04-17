@@ -7,6 +7,8 @@ from contextlib import contextmanager
 import mlflow
 from ray.train import Checkpoint, UserCallback
 
+import pandas as pd
+
 class TrainMlflowLogger(UserCallback):
     def __init__(self, tracking_uri: str, experiment_name: str, run_id: str):
         self._tracking_uri = tracking_uri
@@ -42,6 +44,10 @@ class TrainMlflowLogger(UserCallback):
     def log_dict(self, dictionary: typing.Dict[str, typing.Any], artifact_file: str):
         self._ensure_started()
         mlflow.log_dict(dictionary, artifact_file)
+        
+    def log_table(self, df: pd.DataFrame, artifact_file: str):
+        self._ensure_started()
+        mlflow.log_table(df, artifact_file)
 
     def log_text(self, text: str, artifact_file: str):
         self._ensure_started()
