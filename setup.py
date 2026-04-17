@@ -46,10 +46,12 @@ setuptools.setup(
         'simple-struct @ git+https://github.com/y-du/simple-struct.git@0.2.0',
         'concurrency-watchdog @ git+https://github.com/SENERGY-Platform/concurrency-watchdog.git@0.1.1',
         'confluent_kafka==2.4.0',
-        'kazoo<3',
         'prometheus-client<1',
-        'model_trainer_client @ git+https://github.com/SENERGY-Platform/ml-trainer@v2.0.65#subdirectory=client',
-        'mlflow==3.8.1'
+        'mlflow==3.8.1',
+        'ray[data]==2.55.0',
+        'ray[client]==2.55.0',
+        'psycopg2-binary==2.9.11',
+        'structlog @ git+https://github.com/SENERGY-Platform/python-structlog.git@0.2.2'
     ],
     packages=setuptools.find_packages(),
     python_requires='>=3.5.3',

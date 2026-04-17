@@ -14,16 +14,18 @@
    limitations under the License.
 """
 
+import os
+
 from .config import *
 from .logger import *
 from .model import *
 from .op_base import *
+from .op_ml import *
 from .init_phase import *
 from .timestamps import *
 from .start_time import *
 import math
-import kazoo.client
-import json
+
 import typing
 import hashlib
 
@@ -33,13 +35,14 @@ from copy import deepcopy
 def print_init(name, git_info_file):
     lines = list()
     l_len = len(name)
-    with open(git_info_file, "r") as file:
-        for line in file:
-            key, value = line.strip().split("=")
-            line = f"{key}: {value}"
-            lines.append(line)
-            if len(line) > l_len:
-                l_len = len(line)
+    if git_info_file is not None and os.path.isfile(git_info_file):
+        with open(git_info_file, "r") as file:
+            for line in file:
+                key, value = line.strip().split("=")
+                line = f"{key}: {value}"
+                lines.append(line)
+                if len(line) > l_len:
+                    l_len = len(line)
     if len(name) < l_len:
         l_len = math.ceil((l_len - len(name) - 2) / 2)
         print("*" * l_len + f" {name} " + "*" * l_len)
@@ -49,19 +52,6 @@ def print_init(name, git_info_file):
     for line in lines:
         print(line)
     print("*" * l_len)
-
-
-def get_kafka_brokers(zk_hosts: str, zk_path: str):
-    zk_client = kazoo.client.KazooClient(hosts=zk_hosts)
-    zk_client.start()
-    brokers = list()
-    for id in zk_client.get_children(zk_path):
-        data, _ = zk_client.get(f"{zk_path}/{id}")
-        data = json.loads(data)
-        brokers.append(f"{data['host']}:{data['port']}")
-    zk_client.stop()
-    return brokers
-
 
 def gen_identifiers(name: str, f_type: str, f_value: str, pipeline_id: str):
     if f_type == "DeviceId":

@@ -17,8 +17,8 @@
 __all__ = ("OperatorConfig", "Config", "Selector")
 
 import simple_struct
-import json
 import typing
+import os
 
 
 class Selector(simple_struct.Structure):
@@ -32,6 +32,9 @@ class Selector(simple_struct.Structure):
 
 class Config(simple_struct.Structure):
     logger_level = "warning"
+    mlflow_url = "http://mlflow-svc.mlflow.svc.cluster.local:5000"
+    ray_url = "ray://cluster-kuberay-head-svc.ray.svc.cluster.local:10001"
+    ts_conn = "postgresql://postgres:tea@timescale-db.timescale.svc.cluster.local/postgres"
 
     def __init__(self, d, **kwargs):
         super().__init__(d, **kwargs)
