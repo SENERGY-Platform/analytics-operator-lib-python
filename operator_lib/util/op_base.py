@@ -63,23 +63,35 @@ class OperatorBase:
         setattr(obj, f"_{OperatorBase.__name__}__stopped", False)
         return obj
 
-    def __call_run(self, message, device_id, timestamp: datetime.datetime):
+    def __call_run(self, message, device_id, timestamp: datetime.datetime) -> typing.Tuple[typing.List[typing.Optional[datetime.datetime]], typing.List[typing.Any]]:
         run_results = list()
+        dt_results = list()
         try:
             for result in self.__filter_handler.get_results(message=message):
                 if not result.ex:
                     for f_id in result.filter_ids:
-                        run_result = self.run(
+                        ret = self.run(
                             selector=self.__filter_handler.get_filter_args(id=f_id)["selector"],
                             data=result.data,
                             device_id=device_id,
                             timestamp=timestamp,
                         )
+                        if isinstance(ret, (list, tuple)) and len(ret) == 2 and (
+                            isinstance(ret[0], datetime.datetime) or ret[0] is None
+                        ):
+                            dt_result, run_result = ret
+                        else:
+                            dt_result = None
+                            run_result = ret
                         if run_result is not None:
                             if isinstance(run_result, list):
                                 run_results += run_result
                             else:
                                 run_results.append(run_result)
+                            if isinstance(dt_results, list):
+                                dt_results += dt_result
+                            else:
+                                dt_results.append(dt_result)                          
                 else:
                     logger.error(result.ex)
                     self.__handle_result_error(result.ex, message, self.produce, device_id)
@@ -88,7 +100,7 @@ class OperatorBase:
             pass
         except mf_lib.exceptions.MessageIdentificationError as ex:
             logger.error(ex)
-        return run_results
+        return dt_results, run_results
 
     def __route(self):
         msg_obj = self.__kafka_consumer.poll(timeout=self.__poll_timeout)
@@ -100,8 +112,12 @@ class OperatorBase:
                 else:
                     logger.error("Kafka Broker does not support timestamps, using now() as substitute")
                     timestamp = datetime.datetime.now()
-                results = self.__call_run(json.loads(msg_obj.value()), json.loads(msg_obj.value()).get('device_id'), timestamp)
+                dt_results, results = self.__call_run(json.loads(msg_obj.value()), json.loads(msg_obj.value()).get('device_id'), timestamp)
+                i = 0
                 for result in results:
+                    result_timestamp = 0
+                    if dt_results[i] is not None:
+                        result_timestamp = int(dt_results[i].astimezone(datetime.UTC).timestamp() * 1000)
                     self.__kafka_producer.produce(
                         self.__output_topic,
                         json.dumps(
@@ -112,8 +128,10 @@ class OperatorBase:
                                 "time": "{}Z".format(datetime.datetime.utcnow().isoformat())
                             }
                         ),
-                        self.__operator_id
+                        self.__operator_id,
+                        timestamp=result_timestamp
                     )
+                    i += 1
             else:
                 raise confluent_kafka.KafkaException(msg_obj.error())
 
@@ -200,13 +218,13 @@ class OperatorBase:
             self.__operator_id
         )
 
-    def run(self, data: typing.Dict[str, typing.Any], selector: str, device_id: str, timestamp: datetime.datetime):
+    def run(self, data: typing.Dict[str, typing.Any], selector: str, device_id: str, timestamp: datetime.datetime) -> typing.Tuple[typing.Optional[datetime.datetime], typing.Any]:
         """
         Subclasses must override this method.
         :param data: Dictionary containing data extracted from a message.
         :param selector: Name of a selector identifying the extracted data.
         :param device_id: ID of the device the message originates from
         :param timestamp: Kafka stored message timestamp.
-        :return: Result data or None.
+        :return: Result timestamp and data or None.
         """
         pass

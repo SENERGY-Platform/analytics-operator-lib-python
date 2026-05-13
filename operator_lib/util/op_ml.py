@@ -79,7 +79,7 @@ class MLOperator(OperatorBase):
         return self.model
 
     @abc.abstractmethod
-    def infer(self, model: typing.Optional[PyFuncModel], data: typing.Dict[str, typing.Any], selector: str, device_id: str, timestamp: datetime.datetime) -> typing.Tuple[typing.Optional[typing.Any], typing.Optional[PythonModel]]:
+    def infer(self, model: typing.Optional[PyFuncModel], data: typing.Dict[str, typing.Any], selector: str, device_id: str, timestamp: datetime.datetime) -> typing.Tuple[typing.Optional[datetime.datetime], typing.Optional[typing.Any], typing.Optional[PythonModel]]:
         """
         Subclasses must override this method.
         It will be called for each message. The current model will be provided. If your ML algorithm changes the model on each inference, you can return the new model as the second return value. This will update the model in mlflow and set it as the current model. If you return None as the second return value, the model is not updated. You should only return a new model if it is actually updated.
@@ -136,10 +136,10 @@ class MLOperator(OperatorBase):
         """
         The method will be called by the Operator Lib. It should not be called or overridden by subclasses. Subclasses should implement the infer and train method to provide ML functionality.
         """
-        result, model = self.infer(
+        dt_result, result, model = self.infer(
             self.model, data, selector, device_id, timestamp)
         if model is not None:
             self.__update_model(model)
         if self.need_retraining(self.model):
             self.__wrap_training()
-        return result
+        return dt_result, result
