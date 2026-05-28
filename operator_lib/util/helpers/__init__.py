@@ -1,2 +1,2 @@
-from .data import provide_historic_data
+from .data import provide_historic_data, provide_historic_data_local
 from .mlflow_logger import TrainMlflowLogger

@@ -1,4 +1,5 @@
 import psycopg2
+from psycopg2.extensions import connection as Psycopg2Connection
 import ray
 import datetime
 from operator_lib.util.model import InputTopic
@@ -6,7 +7,38 @@ import base64
 import time
 
 @ray.remote
-def get_timescale_dataset(conn_str: str, conf: InputTopic, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:
+def get_timescale_dataset_remote(conn_str: str, conf: InputTopic, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:
+    query = __get_timescale_dataset_query(conn_str, conf, duration, require_full_duration)
+    '''
+    Expect to have this function available in timescale: # TODO ensure with job
+    
+    CREATE OR REPLACE FUNCTION timestamptz_to_millis(ts timestamptz)
+    RETURNS bigint AS $$
+    BEGIN
+        RETURN (EXTRACT(EPOCH FROM ts) * 1000)::bigint;
+    END;
+    $$ LANGUAGE plpgsql IMMUTABLE;
+    '''
+    ds = ray.data.read_sql(query, lambda: __create_timescale_connection(conn_str), shard_keys=["time"], shard_hash_fn="timestamptz_to_millis", concurrency=4)
+    return ds
+
+def get_timescale_dataset_local(conn_str: str, conf: InputTopic, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:
+    query = __get_timescale_dataset_query(conn_str, conf, duration, require_full_duration)
+    conn = __create_timescale_connection(conn_str)
+    import pandas as pd
+    import pandas.io.sql as sqlio
+    data = sqlio.read_sql_query(query, conn)
+
+    # Ray+PyArrow cannot infer timezone-aware pandas dtypes like datetime64[ns, UTC].
+    # Normalize all tz-aware datetime columns to UTC-naive datetimes before ingestion.
+    for col in data.columns:
+        if pd.api.types.is_datetime64tz_dtype(data[col].dtype):
+            data[col] = data[col].dt.tz_convert("UTC").dt.tz_localize(None)
+
+    ds = ray.data.from_pandas(data)
+    return ds
+
+def __get_timescale_dataset_query(conn_str: str, conf: InputTopic, duration: datetime.timedelta, require_full_duration: bool = False) -> str:
     table_name = __quote_identifier(__get_table_name(
         conf.filterValue, conf.name.replace("_", ":")))
     columns = []
@@ -43,20 +75,8 @@ def get_timescale_dataset(conn_str: str, conf: InputTopic, duration: datetime.ti
                     time.sleep((duration - time_diff).total_seconds())
             else:
                 time.sleep(duration)  # currently no data -> sleep for full duration
-
-    '''
-    Expect to have this function available in timescale: # TODO ensure with job
     
-    CREATE OR REPLACE FUNCTION timestamptz_to_millis(ts timestamptz)
-    RETURNS bigint AS $$
-    BEGIN
-        RETURN (EXTRACT(EPOCH FROM ts) * 1000)::bigint;
-    END;
-    $$ LANGUAGE plpgsql IMMUTABLE;
-    '''
-    
-    ds = ray.data.read_sql(query, lambda: __create_timescale_connection(conn_str), shard_keys=["time"], shard_hash_fn="timestamptz_to_millis")
-    return ds
+    return query
 
 
 def __quote_identifier(value: str) -> str:
@@ -77,5 +97,5 @@ def __get_table_name(device_id: str, service_id: str) -> str:
 
 
 
-def __create_timescale_connection(conn_str: str):
+def __create_timescale_connection(conn_str: str) -> Psycopg2Connection:
     return psycopg2.connect(conn_str)

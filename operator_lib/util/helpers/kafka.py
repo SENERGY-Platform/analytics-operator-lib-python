@@ -42,6 +42,10 @@ def json_get(value_col, key: str):
 
 
 @ray.remote
+def get_kafka_dataset_remote(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:    
+    return get_kafka_dataset(bootstrap, input_topic, pipeline_id, duration, require_full_duration)
+
+
 def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:    
     if input_topic.filterType == "OperatorId":
         for m in input_topic.mappings:
