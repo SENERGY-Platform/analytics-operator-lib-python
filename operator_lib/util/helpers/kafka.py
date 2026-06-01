@@ -43,10 +43,12 @@ def json_get(value_col, key: str):
 
 @ray.remote
 def get_kafka_dataset_remote(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:    
-    return get_kafka_dataset(bootstrap, input_topic, pipeline_id, duration, require_full_duration)
+    return __get_kafka_dataset(bootstrap, input_topic, pipeline_id, duration, require_full_duration)
 
+def get_kafka_dataset_local(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:    
+    return __get_kafka_dataset(bootstrap, input_topic, pipeline_id, duration, require_full_duration)
 
-def get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:    
+def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False) -> ray.data.Dataset:    
     if input_topic.filterType == "OperatorId":
         for m in input_topic.mappings:
             if not m.source.startswith("analytics."):
@@ -135,7 +137,9 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
     expressions = []
     for f in filter:
         expressions.append((json_get(col("value"), f["key"]) == f["value"]))
-        
+    
+    '''Always use ray kafka reader, no performance benefit from local reading as in timescale.'''
+    
     ds = ray.data.read_kafka(bootstrap_servers=bootstrap, topics=input_topic.name, timeout_ms=24*60*60*1000, override_num_blocks=10, start_offset=cutoff)
     if len(expressions) == 0:
         return ds, cutoff
