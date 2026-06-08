@@ -117,7 +117,7 @@ class OperatorBase:
                 for result in results:
                     result_timestamp = 0
                     if dt_results[i] is not None:
-                        result_timestamp = int(dt_results[i].astimezone(datetime.UTC).timestamp() * 1000)
+                        result_timestamp = int(dt_results[i].astimezone(datetime.timezone.utc).timestamp() * 1000)
                     self.__kafka_producer.produce(
                         self.__output_topic,
                         json.dumps(
