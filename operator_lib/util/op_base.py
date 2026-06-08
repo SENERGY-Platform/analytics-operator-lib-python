@@ -88,7 +88,7 @@ class OperatorBase:
                                 run_results += run_result
                             else:
                                 run_results.append(run_result)
-                            if isinstance(dt_results, list):
+                            if isinstance(dt_result, list):
                                 dt_results += dt_result
                             else:
                                 dt_results.append(dt_result)                          
