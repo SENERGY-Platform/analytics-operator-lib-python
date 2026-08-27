@@ -62,7 +62,10 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
                 print(f"No messages found in Kafka, sleeping for {sleep_for} before retrying...")
                 time.sleep(sleep_for)
                 continue
-            msg_timestamp = datetime.datetime.fromtimestamp(msg[0]["timestamp"] / 1000.0)
+            msg_timestamp = datetime.datetime.fromtimestamp(
+                msg[0]["timestamp"] / 1000.0,
+                tz=datetime.timezone.utc
+            )
             offset = cutoff - msg_timestamp
             if offset < duration / 10:
                 return ds.map_batches(lambda batch: __map_kafka_batch(batch, input_topic.mappings), batch_format="pandas")
@@ -128,7 +131,7 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
     # Lazy import avoids importing operator_lib.util during package initialization.
     from operator_lib.util import gen_identifiers
 
-    now = datetime.datetime.now()
+    now = datetime.datetime.now(datetime.timezone.utc)
     cutoff = now - duration
     filter = gen_identifiers(name=input_topic.name, f_type=input_topic.filterType,
                                        f_value=input_topic.filterValue, pipeline_id=pipeline_id)

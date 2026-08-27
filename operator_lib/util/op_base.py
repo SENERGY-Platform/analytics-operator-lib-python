@@ -108,16 +108,21 @@ class OperatorBase:
             if not msg_obj.error():
                 ts_data = msg_obj.timestamp()
                 if ts_data[0] != confluent_kafka.TIMESTAMP_NOT_AVAILABLE:
-                    timestamp = datetime.datetime.fromtimestamp(ts_data[1]/1000)
+                    timestamp = datetime.datetime.fromtimestamp(ts_data[1]/1000,tz=datetime.timezone.utc)
                 else:
                     logger.error("Kafka Broker does not support timestamps, using now() as substitute")
-                    timestamp = datetime.datetime.now()
+                    timestamp = datetime.datetime.now(datetime.timezone.utc)
                 dt_results, results = self.__call_run(json.loads(msg_obj.value()), json.loads(msg_obj.value()).get('device_id'), timestamp)
                 i = 0
                 for result in results:
                     result_timestamp = 0
                     if dt_results[i] is not None:
-                        result_timestamp = int(dt_results[i].astimezone(datetime.timezone.utc).timestamp() * 1000)
+                        result_datetime = dt_results[i]
+                        if result_datetime.tzinfo is None:
+                            result_datetime = result_datetime.replace(tzinfo=datetime.timezone.utc)
+                        else:
+                            result_datetime = result_datetime.astimezone(datetime.timezone.utc)
+                        result_timestamp = int(result_datetime.timestamp() * 1000)
                     self.__kafka_producer.produce(
                         self.__output_topic,
                         json.dumps(
