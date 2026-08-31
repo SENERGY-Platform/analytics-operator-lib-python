@@ -34,7 +34,16 @@ class Config(simple_struct.Structure):
     logger_level = "warning"
     mlflow_url = "http://mlflow-svc.mlflow.svc.cluster.local:5000"
     ray_url = "ray://cluster-kuberay-head-svc.ray.svc.cluster.local:10001"
-    ts_conn = "postgresql://postgres:tea@timescale-db.timescale.svc.cluster.local/postgres"
+    # No default. This is a database credential reaching every series in the
+    # instance, and a compiled-in one is how every operator got there without
+    # anybody configuring it. The flow engine sets it per deployment; an
+    # environment that runs untrusted code sets ts_wrapper_url instead and hands
+    # the operator no credential at all.
+    ts_conn = None
+    # Where history is read through timescale-wrapper, which checks the caller's
+    # own permission on the device. Used when ts_conn is absent and a platform
+    # token is present.
+    ts_wrapper_url = None
 
     def __init__(self, d, **kwargs):
         super().__init__(d, **kwargs)

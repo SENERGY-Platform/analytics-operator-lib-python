@@ -17,7 +17,9 @@
 __all__ = (
     "DeploymentConfig",
     "MissingDeploymentConfigError",
+    "MissingConfigValueError",
     "load_operator_config_json",
+    "require_config",
 )
 
 import json
@@ -39,6 +41,11 @@ class DeploymentConfig(sevm.Config):
     zk_brokers_path = "/brokers/ids"
     metrics = False
     metrics_port = 5555
+    # The platform token the operator reads history with where it has no database
+    # credential. An environment variable rather than part of CONFIG: it is a
+    # credential with its own lifetime, and it is renewed independently of the
+    # configuration a deployment was started with.
+    senergy_token = None
 
 
 class MissingDeploymentConfigError(RuntimeError):
@@ -55,3 +62,19 @@ def load_operator_config_json(dep_config: DeploymentConfig) -> dict:
     if dep_config.config is None:
         raise MissingDeploymentConfigError()
     return json.loads(dep_config.config)
+
+
+class MissingConfigValueError(RuntimeError):
+    def __init__(self, message: str):
+        super().__init__(message)
+
+
+def require_config(value, name: str, purpose: str):
+    """
+    Return a config value or fail with a named error, rather than letting a None
+    reach whatever would have used it.
+    """
+    if not value:
+        raise MissingConfigValueError(
+            f"config value '{name}' is not set, it is required to {purpose}")
+    return value
