@@ -43,12 +43,19 @@ _handler.setFormatter(_json_formatter)
 logger.addHandler(_handler)
 
 
-def init_logger(level, project_name="OperatorLib"):
+def init_logger(level, project_name="OperatorLib", baggage=None):
+    """
+    'baggage' is the OpenTelemetry context of the request that started this
+    pipeline, parsed out of the BAGGAGE environment variable. Its entries become
+    static fields on every log record, which is what makes a line from this
+    operator findable by, for example, the smart service instance it belongs to.
+    """
     if level == "":
         level = "warning"
     if level not in logging_levels.keys():
         raise LoggerError(level)
-    logger.configure(organization_name='github.com/SENERGY-Platform', project_name=project_name, time_utc=True, logger_name=True)
+    logger.configure(organization_name='github.com/SENERGY-Platform', project_name=project_name, time_utc=True,
+                     logger_name=True, extra=baggage)
     log_level = logging_levels[level]
     logger.setLevel(log_level)
     root = logging.getLogger()

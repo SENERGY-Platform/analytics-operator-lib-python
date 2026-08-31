@@ -16,6 +16,7 @@
 
 import os
 
+from .baggage import *
 from .config import *
 from .logger import *
 from .model import *

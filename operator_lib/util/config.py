@@ -46,6 +46,14 @@ class DeploymentConfig(sevm.Config):
     # credential with its own lifetime, and it is renewed independently of the
     # configuration a deployment was started with.
     senergy_token = None
+    # The OpenTelemetry baggage of the request that started this pipeline, as a W3C
+    # baggage header. Put into every log record so a line from this operator can be
+    # traced back to the caller's context, for instance to a smart service instance.
+    #
+    # An environment variable rather than part of CONFIG, because it describes the
+    # deployment rather than the operator, and because the same value is what the
+    # pod labels carry for the log aggregation.
+    baggage = None
 
 
 class MissingDeploymentConfigError(RuntimeError):
