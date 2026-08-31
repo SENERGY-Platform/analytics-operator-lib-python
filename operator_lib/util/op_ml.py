@@ -132,6 +132,16 @@ class MLOperator(OperatorBase):
         if model is not None:
             self.__update_model(model)
 
+    def train_once(self) -> typing.Optional[PyFuncModel]:
+        """
+        Run a single training, regardless of whether a model is already registered. This is what
+        init does when it finds none. Public so that a caller outside the deployment lifecycle -- a
+        development run, an evaluation run -- can ask for it explicitly.
+        :return: The current model, unchanged if train returned None.
+        """
+        self.__wrap_training()
+        return self.model
+
     def run(self, data: typing.Dict[str, typing.Any], selector: str, device_id: str, timestamp: datetime.datetime):
         """
         The method will be called by the Operator Lib. It should not be called or overridden by subclasses. Subclasses should implement the infer and train method to provide ML functionality.
