@@ -32,7 +32,7 @@ class OperatorLib:
         util.print_init(name=name, git_info_file=git_info_file)
         dep_config = util.DeploymentConfig()
         self.__dep_config = dep_config
-        config_json = json.loads(dep_config.config)
+        config_json = util.load_operator_config_json(dep_config)
         opr_config = util.OperatorConfig(config_json)
         util.init_logger(opr_config.config.logger_level, name)
         util.logger.debug(f"deployment config: {dep_config}")

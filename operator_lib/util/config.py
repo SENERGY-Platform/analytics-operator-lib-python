@@ -14,7 +14,13 @@
    limitations under the License.
 """
 
-__all__ = ("DeploymentConfig", )
+__all__ = (
+    "DeploymentConfig",
+    "MissingDeploymentConfigError",
+    "load_operator_config_json",
+)
+
+import json
 
 import sevm
 
@@ -34,3 +40,18 @@ class DeploymentConfig(sevm.Config):
     metrics = False
     metrics_port = 5555
 
+
+class MissingDeploymentConfigError(RuntimeError):
+    def __init__(self):
+        super().__init__(
+            "no deployment configuration: CONFIG is not set, this operator was not started by the flow engine"
+        )
+
+
+def load_operator_config_json(dep_config: DeploymentConfig) -> dict:
+    """
+    Parse the operator configuration the flow engine hands over in CONFIG.
+    """
+    if dep_config.config is None:
+        raise MissingDeploymentConfigError()
+    return json.loads(dep_config.config)

@@ -5,8 +5,6 @@ import operator_lib.util as util
 from operator_lib.util.helpers.timescale import get_timescale_dataset_local, get_timescale_dataset_remote
 from operator_lib.util.helpers.kafka import get_kafka_dataset_local, get_kafka_dataset_remote
 
-import json
-
 ALWAYS_PREFER_KAFKA = False # Can be used to debug kafka data source
 
 def provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False) -> typing.List[ray.ObjectRef[ray.data.Dataset]]:
@@ -29,7 +27,7 @@ def provide_historic_data_local(duration: datetime.timedelta, require_full_durat
 def __provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False, remote: bool = True):
     ds: typing.List[ray.ObjectRef[ray.data.Dataset]] = []
     dep_config = util.DeploymentConfig()
-    config_json = json.loads(dep_config.config)
+    config_json = util.load_operator_config_json(dep_config)
     opr_config = util.OperatorConfig(config_json)
     for topic in opr_config.inputTopics:
         if topic.name.startswith("urn_infai_ses_service") and not ALWAYS_PREFER_KAFKA:
