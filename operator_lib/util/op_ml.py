@@ -27,6 +27,7 @@ import typing
 import abc
 import mlflow
 from mlflow import MlflowClient
+from mlflow.environment_variables import MLFLOW_RUN_ID
 from mlflow.pyfunc import PyFuncModel, PythonModel
 import datetime
 import ray
@@ -114,8 +115,15 @@ class MLOperator(OperatorBase):
         return False
 
     def __start_run(self):
-        job_name = f"{self.model_id}@{datetime.datetime.now().isoformat(timespec='microseconds')}"
-        self.__run = mlflow.start_run(run_name=job_name)
+        # A run handed over in MLFLOW_RUN_ID keeps the name its creator gave it.
+        # mlflow's fluent start_run resumes that run and passes whatever run_name it
+        # is given straight to update_run_info, so offering one here renames somebody
+        # else's run -- and the only way to leave the name alone is not to offer one.
+        # A deployment sets no MLFLOW_RUN_ID and still opens the named run below.
+        run_name = None
+        if MLFLOW_RUN_ID.get() is None:
+            run_name = f"{self.model_id}@{datetime.datetime.now().isoformat(timespec='microseconds')}"
+        self.__run = mlflow.start_run(run_name=run_name)
         self.__mlflow_logger = TrainMlflowLogger(
             self.config.mlflow_url, self.model_id, self.__run.info.run_id)
 
