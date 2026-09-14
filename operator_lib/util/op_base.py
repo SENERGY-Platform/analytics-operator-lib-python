@@ -18,6 +18,7 @@ __all__ = ("OperatorBase",)
 
 from .logger import logger
 from .model import Config, Selector
+from . import clock
 import confluent_kafka
 import mf_lib
 import json
@@ -185,6 +186,14 @@ class OperatorBase:
         self.__poll_timeout = poll_timeout
         self.__handle_result_error = result_error_handler
         self.config = config
+        # The one place the bound enters, below the operator's own code: a
+        # config carrying training_end (an Operator Development Environment
+        # launch with a data split) fixes the clock there; otherwise the clock
+        # runs on the wall clock, which is what every deployed operator sees.
+        if config.training_end:
+            clock.set_fixed(clock.parse_time(config.training_end))
+        else:
+            clock.set_fixed(None)
 
     def get_pipeline_id(self) -> str:
         return self.__pipeline_id

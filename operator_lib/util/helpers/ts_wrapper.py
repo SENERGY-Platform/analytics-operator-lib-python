@@ -95,8 +95,9 @@ def get_ts_wrapper_dataset_local(
     conf: InputTopic,
     duration: datetime.timedelta,
     require_full_duration: bool = False,
+    end: typing.Optional[datetime.datetime] = None,
 ) -> ray.data.Dataset:
-    frame = read_history(wrapper_url, token, conf, duration, require_full_duration)
+    frame = read_history(wrapper_url, token, conf, duration, require_full_duration, end)
     return ray.data.from_pandas(frame)
 
 
@@ -107,13 +108,14 @@ def get_ts_wrapper_dataset_remote(
     conf: InputTopic,
     duration: datetime.timedelta,
     require_full_duration: bool = False,
+    end: typing.Optional[datetime.datetime] = None,
 ) -> ray.data.Dataset:
     # A ray task around the same read. Unlike the direct path this cannot shard
     # the read across workers -- ray.data.read_sql does that against Postgres
     # with a shard key, and there is no equivalent over one HTTP response -- so
     # this is a sequential fetch that happens to run on a worker.
     return get_ts_wrapper_dataset_local(
-        wrapper_url, token, conf, duration, require_full_duration)
+        wrapper_url, token, conf, duration, require_full_duration, end)
 
 
 def read_history(
@@ -122,17 +124,26 @@ def read_history(
     conf: InputTopic,
     duration: datetime.timedelta,
     require_full_duration: bool = False,
+    end: typing.Optional[datetime.datetime] = None,
 ):
     """
     Return the same frame the direct path returns: a `time` column plus one
     column per mapping, named after the mapping's dest, ordered by time ascending.
+
+    With `end` given the window is the fixed `[end - duration, end)` rather than
+    `[now - duration, now)`, and `require_full_duration` cannot wait its way to
+    more data against a bound that will not move: `_require_reach` probes once
+    and raises instead of `_await_full_duration`'s sleep loop.
     """
     import pandas as pd
 
     if require_full_duration:
-        _await_full_duration(wrapper_url, token, conf, duration)
+        if end is not None:
+            _require_reach(wrapper_url, token, conf, duration, end)
+        else:
+            _await_full_duration(wrapper_url, token, conf, duration)
 
-    end = datetime.datetime.now(datetime.timezone.utc)
+    end = end if end is not None else datetime.datetime.now(datetime.timezone.utc)
     start = end - duration
 
     frames = []
@@ -356,6 +367,42 @@ def _await_full_duration(
         logger.debug(
             f"{_describe(conf)} reaches back {reach}, waiting {remaining}s for {duration}")
         time.sleep(remaining)
+
+
+def _require_reach(
+    wrapper_url: str,
+    token: str,
+    conf: InputTopic,
+    duration: datetime.timedelta,
+    end: datetime.datetime,
+):
+    """
+    Single-shot counterpart of `_await_full_duration` for a fixed `end`: a bound
+    that will not advance cannot be waited past, so this probes the series once,
+    ascending from `end - duration`, and raises ValueError rather than sleeping
+    towards a window that will never arrive.
+    """
+    element = _build_element(conf, end - duration, end)
+    element["limit"] = 1
+    element["orderDirection"] = "asc"
+    try:
+        frame = _decode(_post(wrapper_url, token, [element]), conf)
+    except _OversizedResponse:
+        # One row cannot be too large; treat it as the service failing.
+        raise TimescaleWrapperError(
+            f"timescale-wrapper could not answer a one-row probe for "
+            f"{_describe(conf)}, so the service rather than the size is the problem")
+    if frame.empty:
+        raise ValueError(
+            f"no data for {_describe(conf)} in the {duration} before "
+            f"{end.isoformat()}; require_full_duration cannot wait for a fixed end")
+    oldest = frame["time"].iloc[0].to_pydatetime()
+    reach = end - oldest
+    if reach < duration:
+        raise ValueError(
+            f"{_describe(conf)} reaches back only {reach} before {end.isoformat()}, "
+            f"short of the {duration} require_full_duration asked for; "
+            f"require_full_duration cannot wait for a fixed end")
 
 
 def _describe(conf: InputTopic) -> str:

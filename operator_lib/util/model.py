@@ -44,6 +44,15 @@ class Config(simple_struct.Structure):
     # own permission on the device. Used when ts_conn is absent and a platform
     # token is present.
     ts_wrapper_url = None
+    # Both ISO 8601 UTC strings, set by an Operator Development Environment
+    # launch that carries a data split: training_end is the bound every history
+    # read applies (see operator_lib.util.clock), test_end triggers the
+    # evaluation phase in MLOperator.init(). The flow engine sets neither, so a
+    # deployed operator is unchanged. simple_struct.Structure reads only
+    # declared class attributes, so a library older than this one silently
+    # ignores both instead of failing to parse the config.
+    training_end = None
+    test_end = None
 
     def __init__(self, d, **kwargs):
         super().__init__(d, **kwargs)
