@@ -28,6 +28,7 @@ import datetime
 import typing
 import abc
 import json
+import math
 import os
 import tempfile
 import time
@@ -353,6 +354,33 @@ class MLOperator(OperatorBase):
             client.log_param(run_id, "evaluation.window_start", training_end.isoformat())
             client.log_param(run_id, "evaluation.window_end", test_end.isoformat())
 
+            # The test-window metric, from what is already in memory above --
+            # prediction_rows and merged -- and nothing else: no new read, no
+            # new artefact. `inputs` is read too, for the mapping source that
+            # resolves evaluation_target_series; it was built before this
+            # try's loop and is still in scope here, but may not exist at all
+            # if the run failed before that point, which is one more reason
+            # this whole call is guarded rather than trusted. A failure here
+            # must not fail the replay that already completed (or already
+            # failed for its own reason, which this must not shadow) -- so it
+            # is caught and turned into the status reason instead of
+            # propagating.
+            try:
+                metric_status, metric_name, metric_value, metric_n = \
+                    _compute_evaluation_metric(
+                        self.config, prediction_rows, merged, inputs)
+            except Exception as ex:
+                logger.exception(
+                    "evaluation: metric computation raised; logging the "
+                    "reason instead of a metric")
+                metric_status, metric_name, metric_value, metric_n = (
+                    f"error: {ex}", None, None, None)
+            client.log_param(run_id, "evaluation.metric_status", metric_status)
+            if metric_status == "computed":
+                client.log_param(run_id, "evaluation.metric_name", metric_name)
+                client.log_param(run_id, "evaluation.metric_value", metric_value)
+                client.log_param(run_id, "evaluation.metric_n", metric_n)
+
             # inputs.csv is gone: it carried platform measurements from the
             # test window, and the singleuser pod that would read it back
             # reaches MLflow without a token -- an unconfirmed cell asking
@@ -430,3 +458,168 @@ def _plain_value(value):
     if hasattr(value, "item"):
         return value.item()
     return value
+
+
+_EVALUATION_METRICS = ("mae", "rmse")
+# A fixed origin for bucket truncation, so that a prediction's result_time and
+# the target series' own timestamps -- read from unrelated places, at
+# unrelated moments -- fall into the same bucket whenever they land in the
+# same resolution-wide interval. Which epoch is used does not matter on its
+# own, only that both sides of the metric use the same one.
+_BUCKET_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+
+
+def _bucket_start(at: datetime.datetime, resolution: datetime.timedelta) -> datetime.datetime:
+    """
+    The start of the fixed-width bucket `at` falls into, by truncation --
+    never rounding: floor division on the elapsed time since a fixed epoch,
+    which is exact integer arithmetic on datetime.timedelta and never rounds
+    a value up into the next bucket.
+    """
+    elapsed = at - _BUCKET_EPOCH
+    return _BUCKET_EPOCH + (elapsed // resolution) * resolution
+
+
+def _resolve_target_series(target_series, inputs):
+    """
+    Resolve a platform path against every input topic mapping's `source`,
+    dropping its first path element the same way
+    helpers/ts_wrapper.py's `_source_path` does when it turns a mapping
+    source into the column name it asks timescale-wrapper for -- the same
+    identity ODE and the wrapper already agree on, not a second rule invented
+    here.
+
+    `inputs` is the (InputTopic, frame) list __evaluate already built before
+    the replay loop; no new read happens to answer this.
+
+    Returns (topic_name, dest, error): exactly one of the pair or `error` is
+    not None. `error` names why zero or more than one mapping matched --
+    topic names are taken as unique among one operator's input topics, the
+    same assumption dests_by_topic above already makes, so a match is
+    reported per mapping rather than per topic.
+    """
+    from operator_lib.util.helpers.ts_wrapper import _source_path
+
+    matches = []
+    for topic, _frame in inputs:
+        for mapping in topic.mappings:
+            if mapping.source and _source_path(mapping.source) == target_series:
+                matches.append((topic.name, mapping.dest))
+
+    if not matches:
+        return None, None, f"target series '{target_series}' matches no input topic"
+    if len(matches) > 1:
+        return None, None, (
+            f"target series '{target_series}' matches {len(matches)} mappings, "
+            f"expected exactly one")
+    topic_name, dest = matches[0]
+    return topic_name, dest, None
+
+
+def _bucket_means(frame, dest: str, resolution: datetime.timedelta) -> typing.Dict[datetime.datetime, float]:
+    """
+    The mean of `dest` in `frame` -- already filtered to the target series'
+    own topic -- grouped by the bucket its `time` falls into. A row whose
+    value is missing or not numeric (see _plain_value) does not enter its
+    bucket's mean at all, rather than counting as zero.
+    """
+    sums: typing.Dict[datetime.datetime, float] = {}
+    counts: typing.Dict[datetime.datetime, int] = {}
+    for _, row in frame.iterrows():
+        value = _plain_value(row[dest])
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        bucket = _bucket_start(_as_utc(row["time"]), resolution)
+        sums[bucket] = sums.get(bucket, 0.0) + value
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return {bucket: sums[bucket] / counts[bucket] for bucket in sums}
+
+
+def _compute_evaluation_metric(config, prediction_rows, merged, inputs):
+    """
+    The test-window metric, from what the replay already holds in memory --
+    prediction_rows and merged -- and nothing else: no new read, no new
+    artefact.
+
+    Returns (status, name, value, n). status is "computed" once a metric was
+    produced, and only then are name/value/n set; otherwise status names why
+    not and the other three are None. Never raises on a data problem -- an
+    unresolvable series, an unknown metric, zero matching predictions -- all
+    end in a status reason instead; the caller still guards against a
+    programming error escaping this function.
+    """
+    metric = config.evaluation_metric
+    target_series = config.evaluation_target_series
+    prediction_field = config.evaluation_prediction_field
+    resolution = config.evaluation_resolution
+
+    missing = [
+        name for name, value in (
+            ("evaluation_metric", metric),
+            ("evaluation_target_series", target_series),
+            ("evaluation_prediction_field", prediction_field),
+            ("evaluation_resolution", resolution),
+        ) if not value
+    ]
+    if missing:
+        # Covers both the documented case -- an older ODE, or a launch
+        # without a frozen scoring target, sets none of the four -- and a
+        # partially filled config, which is just as unable to compute
+        # anything.
+        return f"{', '.join(missing)} not set", None, None, None
+
+    if metric not in _EVALUATION_METRICS:
+        return f"unknown metric '{metric}'", None, None, None
+
+    import pandas as pd
+    try:
+        resolution_delta = pd.Timedelta(resolution).to_pytimedelta()
+    except (ValueError, TypeError) as ex:
+        return f"invalid resolution '{resolution}': {ex}", None, None, None
+    if resolution_delta <= datetime.timedelta(0):
+        return f"invalid resolution '{resolution}': not a positive duration", None, None, None
+
+    topic_name, dest, error = _resolve_target_series(target_series, inputs)
+    if error is not None:
+        return error, None, None, None
+
+    target_frame = merged[merged["topic"] == topic_name]
+    bucket_means = _bucket_means(target_frame, dest, resolution_delta)
+
+    errors = []
+    for row in prediction_rows:
+        # A prediction is a replayed row with both a non-empty result and a
+        # non-empty result_time; an empty result is a message that was
+        # replayed but produced no answer, already counted elsewhere
+        # (evaluation.results) and not a prediction for this metric.
+        if not row["result"] or not row["result_time"]:
+            continue
+        try:
+            result = json.loads(row["result"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(result, dict) or prediction_field not in result:
+            continue
+        predicted = result[prediction_field]
+        if isinstance(predicted, bool) or not isinstance(predicted, (int, float)):
+            continue
+        try:
+            result_time = clock.parse_time(row["result_time"])
+        except ValueError:
+            continue
+        actual = bucket_means.get(_bucket_start(result_time, resolution_delta))
+        if actual is None:
+            # No actual for this bucket -- the tail of the window, where
+            # result_time lands after test_end, is the expected case.
+            continue
+        errors.append(predicted - actual)
+
+    n = len(errors)
+    if n == 0:
+        return "no prediction has a matching actual value", None, None, None
+
+    if metric == "mae":
+        value = sum(abs(e) for e in errors) / n
+    else:
+        value = math.sqrt(sum(e * e for e in errors) / n)
+    return "computed", metric, value, n

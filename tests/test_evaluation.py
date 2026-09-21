@@ -15,6 +15,7 @@
 """
 
 import datetime
+import json
 import os
 import tempfile
 import unittest
@@ -28,7 +29,7 @@ from mlflow import MlflowClient
 from operator_lib.util import clock
 from operator_lib.util.config import MissingConfigValueError
 from operator_lib.util.model import Config, InputTopic
-from operator_lib.util.op_ml import MLOperator
+from operator_lib.util.op_ml import MLOperator, _compute_evaluation_metric
 
 TRAINING_END = datetime.datetime(2026, 6, 1, 0, 0, 0, tzinfo=datetime.timezone.utc)
 TEST_END = datetime.datetime(2026, 6, 1, 0, 5, 0, tzinfo=datetime.timezone.utc)
@@ -230,7 +231,14 @@ class TestEvaluationMode(unittest.TestCase):
             run_id, "evaluation.window_start", TRAINING_END.isoformat())
         mock_client.log_param.assert_any_call(
             run_id, "evaluation.window_end", TEST_END.isoformat())
-        self.assertEqual(4, mock_client.log_param.call_count)
+        # A fifth param: none of the four evaluation_* config keys are set on
+        # this launch, so metric_status is always logged, but the metric
+        # itself is not computed and metric_name/value/n stay absent.
+        mock_client.log_param.assert_any_call(
+            run_id, "evaluation.metric_status",
+            "evaluation_metric, evaluation_target_series, "
+            "evaluation_prediction_field, evaluation_resolution not set")
+        self.assertEqual(5, mock_client.log_param.call_count)
 
         # predictions.csv only: inputs.csv is gone along with the write that
         # produced it.
@@ -461,6 +469,10 @@ class TestEvaluationIsolatesODEsRun(unittest.TestCase):
                 "evaluation.results": "5",
                 "evaluation.window_start": TRAINING_END.isoformat(),
                 "evaluation.window_end": TEST_END.isoformat(),
+                "evaluation.metric_status": (
+                    "evaluation_metric, evaluation_target_series, "
+                    "evaluation_prediction_field, evaluation_resolution not set"
+                ),
             },
             got.data.params,
         )
@@ -598,6 +610,238 @@ class TestEvaluationIsolatesODEsRun(unittest.TestCase):
             min(written), stamped_at,
             "the replay's write must be stamped at or after the phase transition, "
             "or ODE cannot tell it from a metric the training logged")
+
+
+def _metric_input_topic(source="device.sensor.ENERGY.Power", dest="power", name="topic1"):
+    """
+    One input topic with a single mapping. `_source_path` drops the first
+    path element of `source`, so with the default `source` this resolves
+    against target series "sensor.ENERGY.Power".
+    """
+    return InputTopic({
+        "name": name,
+        "filterType": "DeviceId",
+        "filterValue": "device-a",
+        "mappings": [{"dest": dest, "source": source}],
+    })
+
+
+def _actuals_frame(topic_name, dest, rows):
+    """
+    A `merged`-shaped frame carrying the target series' own topic: one row
+    per (iso timestamp, value) pair in `rows`.
+    """
+    return pd.DataFrame({
+        "time": [
+            datetime.datetime.fromisoformat(t.replace("Z", "+00:00")) for t, _ in rows
+        ],
+        "topic": [topic_name] * len(rows),
+        "selector": [None] * len(rows),
+        "device_id": ["device-a"] * len(rows),
+        dest: [v for _, v in rows],
+    })
+
+
+def _prediction_row(result_time, result: dict):
+    return {
+        "time": result_time,
+        "topic": "topic1",
+        "selector": None,
+        "device_id": "device-a",
+        "result_time": result_time,
+        "result": json.dumps(result),
+    }
+
+
+class TestEvaluationMetric(unittest.TestCase):
+    """
+    Direct tests of _compute_evaluation_metric against hand-built
+    prediction_rows/merged/inputs, the same three things __evaluate's finally
+    block already holds in memory -- no replay is run here.
+    """
+
+    def _config(self, **overrides):
+        values = {
+            "evaluation_metric": "mae",
+            "evaluation_target_series": "sensor.ENERGY.Power",
+            "evaluation_prediction_field": "prediction",
+            "evaluation_resolution": "1h",
+        }
+        values.update(overrides)
+        return Config(values)
+
+    def test_mae_matches_a_hand_computed_value(self):
+        inputs = [(_metric_input_topic(), None)]
+        merged = _actuals_frame("topic1", "power", [
+            ("2026-06-01T00:10:00Z", 10.0),
+            ("2026-06-01T00:50:00Z", 20.0),
+        ])  # bucket [00:00, 01:00) actual mean = 15.0
+        prediction_rows = [
+            _prediction_row("2026-06-01T00:05:00Z", {"prediction": 17.0}),  # |17-15|=2
+            _prediction_row("2026-06-01T00:55:00Z", {"prediction": 13.0}),  # |13-15|=2
+        ]
+
+        status, name, value, n = _compute_evaluation_metric(
+            self._config(evaluation_metric="mae"), prediction_rows, merged, inputs)
+
+        self.assertEqual("computed", status)
+        self.assertEqual("mae", name)
+        self.assertAlmostEqual(2.0, value)
+        self.assertEqual(2, n)
+
+    def test_rmse_matches_a_hand_computed_value(self):
+        inputs = [(_metric_input_topic(), None)]
+        merged = _actuals_frame("topic1", "power", [
+            ("2026-06-01T00:10:00Z", 10.0),
+            ("2026-06-01T00:50:00Z", 20.0),
+        ])  # bucket [00:00, 01:00) actual mean = 15.0
+        prediction_rows = [
+            _prediction_row("2026-06-01T00:05:00Z", {"prediction": 17.0}),  # error 2
+            _prediction_row("2026-06-01T00:55:00Z", {"prediction": 11.0}),  # error -4
+        ]
+
+        status, name, value, n = _compute_evaluation_metric(
+            self._config(evaluation_metric="rmse"), prediction_rows, merged, inputs)
+
+        self.assertEqual("computed", status)
+        self.assertEqual("rmse", name)
+        self.assertAlmostEqual(((2.0 ** 2 + 4.0 ** 2) / 2) ** 0.5, value)
+        self.assertEqual(2, n)
+
+    def test_bucket_is_assigned_by_truncation_not_rounding(self):
+        inputs = [(_metric_input_topic(), None)]
+        # Only the [00:00, 01:00) bucket has an actual; [01:00, 02:00) has
+        # none. A prediction one second before the hour must still land in
+        # the earlier bucket -- rounding to the nearest hour would put it in
+        # the empty one instead and drop it.
+        merged = _actuals_frame("topic1", "power", [
+            ("2026-06-01T00:01:00Z", 100.0),
+        ])
+        prediction_rows = [
+            _prediction_row("2026-06-01T00:59:59Z", {"prediction": 110.0}),
+        ]
+
+        status, name, value, n = _compute_evaluation_metric(
+            self._config(evaluation_metric="mae"), prediction_rows, merged, inputs)
+
+        self.assertEqual("computed", status)
+        self.assertEqual(1, n)
+        self.assertAlmostEqual(10.0, value)
+
+    def test_a_prediction_without_a_matching_actual_is_excluded(self):
+        inputs = [(_metric_input_topic(), None)]
+        # Actual data only exists for the first hour -- the usual shape at
+        # the tail of the test window, where result_time runs past test_end.
+        merged = _actuals_frame("topic1", "power", [
+            ("2026-06-01T00:10:00Z", 50.0),
+        ])
+        prediction_rows = [
+            _prediction_row("2026-06-01T00:05:00Z", {"prediction": 55.0}),  # matches, error 5
+            _prediction_row("2026-06-01T02:00:00Z", {"prediction": 999.0}),  # no actual, excluded
+        ]
+
+        status, name, value, n = _compute_evaluation_metric(
+            self._config(evaluation_metric="mae"), prediction_rows, merged, inputs)
+
+        self.assertEqual("computed", status)
+        self.assertEqual(1, n)
+        self.assertAlmostEqual(5.0, value)
+
+    def test_a_row_missing_the_prediction_field_is_excluded(self):
+        inputs = [(_metric_input_topic(), None)]
+        merged = _actuals_frame("topic1", "power", [
+            ("2026-06-01T00:10:00Z", 10.0),
+            ("2026-06-01T00:50:00Z", 20.0),
+        ])  # bucket mean = 15.0
+        prediction_rows = [
+            _prediction_row("2026-06-01T00:05:00Z", {"prediction": 17.0}),  # counted
+            _prediction_row("2026-06-01T00:10:00Z", {"other_field": 999.0}),  # field missing
+        ]
+
+        status, name, value, n = _compute_evaluation_metric(
+            self._config(evaluation_metric="mae"), prediction_rows, merged, inputs)
+
+        self.assertEqual("computed", status)
+        self.assertEqual(1, n)
+        self.assertAlmostEqual(2.0, value)
+
+    def test_an_unknown_metric_name_is_not_computed(self):
+        inputs = [(_metric_input_topic(), None)]
+        merged = _actuals_frame("topic1", "power", [("2026-06-01T00:10:00Z", 10.0)])
+        prediction_rows = [_prediction_row("2026-06-01T00:05:00Z", {"prediction": 1.0})]
+
+        status, name, value, n = _compute_evaluation_metric(
+            self._config(evaluation_metric="mape"), prediction_rows, merged, inputs)
+
+        self.assertEqual("unknown metric 'mape'", status)
+        self.assertIsNone(name)
+        self.assertIsNone(value)
+        self.assertIsNone(n)
+
+    def test_an_unresolvable_target_series_is_not_computed(self):
+        inputs = [(_metric_input_topic(), None)]
+        merged = _actuals_frame("topic1", "power", [("2026-06-01T00:10:00Z", 10.0)])
+        prediction_rows = [_prediction_row("2026-06-01T00:05:00Z", {"prediction": 1.0})]
+
+        status, name, value, n = _compute_evaluation_metric(
+            self._config(evaluation_target_series="sensor.DOES.NOT.EXIST"),
+            prediction_rows, merged, inputs)
+
+        self.assertEqual(
+            "target series 'sensor.DOES.NOT.EXIST' matches no input topic", status)
+        self.assertIsNone(name)
+        self.assertIsNone(value)
+        self.assertIsNone(n)
+
+    def test_a_target_series_matching_more_than_one_mapping_is_not_computed(self):
+        # Two different topics whose mapping sources both resolve, after
+        # dropping the first path element, to the same platform path.
+        inputs = [
+            (_metric_input_topic(source="device-a.sensor.ENERGY.Power", dest="power", name="topic1"), None),
+            (_metric_input_topic(source="device-b.sensor.ENERGY.Power", dest="p2", name="topic2"), None),
+        ]
+        merged = _actuals_frame("topic1", "power", [("2026-06-01T00:10:00Z", 10.0)])
+        prediction_rows = [_prediction_row("2026-06-01T00:05:00Z", {"prediction": 1.0})]
+
+        status, name, value, n = _compute_evaluation_metric(
+            self._config(), prediction_rows, merged, inputs)
+
+        self.assertEqual(
+            "target series 'sensor.ENERGY.Power' matches 2 mappings, expected exactly one",
+            status)
+        self.assertIsNone(name)
+        self.assertIsNone(value)
+        self.assertIsNone(n)
+
+    def test_metric_n_of_zero_is_not_computed(self):
+        inputs = [(_metric_input_topic(), None)]
+        # Actual data exists, but in a bucket the one prediction never falls
+        # into, so nothing is ever paired.
+        merged = _actuals_frame("topic1", "power", [("2026-06-01T05:00:00Z", 10.0)])
+        prediction_rows = [_prediction_row("2026-06-01T00:05:00Z", {"prediction": 1.0})]
+
+        status, name, value, n = _compute_evaluation_metric(
+            self._config(), prediction_rows, merged, inputs)
+
+        self.assertEqual("no prediction has a matching actual value", status)
+        self.assertIsNone(name)
+        self.assertIsNone(value)
+        self.assertIsNone(n)
+
+    def test_missing_config_names_every_unset_key(self):
+        inputs = [(_metric_input_topic(), None)]
+        merged = _actuals_frame("topic1", "power", [("2026-06-01T00:10:00Z", 10.0)])
+
+        status, name, value, n = _compute_evaluation_metric(
+            Config({}), [], merged, inputs)
+
+        self.assertEqual(
+            "evaluation_metric, evaluation_target_series, "
+            "evaluation_prediction_field, evaluation_resolution not set",
+            status)
+        self.assertIsNone(name)
+        self.assertIsNone(value)
+        self.assertIsNone(n)
 
 
 if __name__ == "__main__":

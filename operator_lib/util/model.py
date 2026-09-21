@@ -53,6 +53,24 @@ class Config(simple_struct.Structure):
     # ignores both instead of failing to parse the config.
     training_end = None
     test_end = None
+    # Set together with test_end by an Operator Development Environment launch
+    # whose evaluation protocol has frozen a target series, an output field and
+    # a horizon to score against -- the launch reads them from evaluation.yaml
+    # at the commit it deploys. All four are independent of test_end's own
+    # presence and of each other: MLOperator.__evaluate() computes a metric
+    # only once every one of them is set and evaluation_metric names one it
+    # knows, and otherwise logs why it did not, exactly as a launch that has
+    # not frozen a scoring target -- or an older ODE that predates this
+    # entirely -- already behaves without them.
+    #
+    # evaluation_target_series is a platform path (e.g. "sensor.ENERGY.Power"),
+    # resolved against an input topic mapping's `source`, not its `dest` --
+    # the operator author names `dest` freely, so only `source` is the
+    # platform's own identity for the series.
+    evaluation_metric = None
+    evaluation_target_series = None
+    evaluation_prediction_field = None
+    evaluation_resolution = None
 
     def __init__(self, d, **kwargs):
         super().__init__(d, **kwargs)
