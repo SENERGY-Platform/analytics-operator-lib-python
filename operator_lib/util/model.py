@@ -75,6 +75,22 @@ class Config(simple_struct.Structure):
     def __init__(self, d, **kwargs):
         super().__init__(d, **kwargs)
 
+    # simple_struct.Structure parses, and lets an instance assign, only the
+    # attributes in its class's own __dict__. An operator's `class
+    # CustomConfig(Config)` therefore left every field above at its default,
+    # whatever the deployment config said -- training_end and test_end
+    # included, so a data split never reached init(). Copying the inherited
+    # fields into each subclass makes them declared there too; the nearest
+    # class wins, so a subclass can still override a default.
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        for base in cls.__mro__[1:]:
+            if not issubclass(base, Config):
+                continue
+            for name, value in vars(base).items():
+                if not name.startswith("_") and name not in vars(cls):
+                    setattr(cls, name, value)
+
 
 class Mapping(simple_struct.Structure):
     dest: str = None
