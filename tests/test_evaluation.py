@@ -687,7 +687,7 @@ class TestEvaluationMetric(unittest.TestCase):
         self.assertEqual("computed", status)
         self.assertEqual("mae", name)
         self.assertAlmostEqual(2.0, value)
-        self.assertEqual(2, n)
+        self.assertEqual(1, n)  # both predictions fall into one bucket
 
     def test_rmse_matches_a_hand_computed_value(self):
         inputs = [(_metric_input_topic(), None)]
@@ -706,6 +706,47 @@ class TestEvaluationMetric(unittest.TestCase):
         self.assertEqual("computed", status)
         self.assertEqual("rmse", name)
         self.assertAlmostEqual(((2.0 ** 2 + 4.0 ** 2) / 2) ** 0.5, value)
+        self.assertEqual(1, n)  # both predictions fall into one bucket
+
+    def _unevenly_predicted_buckets(self):
+        """
+        Two buckets with very different prediction counts: three predictions
+        with error 1 in [00:00, 01:00), one with error 5 in [01:00, 02:00) --
+        the shape of a replay whose message rate differs between hours.
+        """
+        inputs = [(_metric_input_topic(), None)]
+        merged = _actuals_frame("topic1", "power", [
+            ("2026-06-01T00:10:00Z", 10.0),
+            ("2026-06-01T01:10:00Z", 10.0),
+        ])
+        prediction_rows = [
+            _prediction_row("2026-06-01T00:05:00Z", {"prediction": 11.0}),
+            _prediction_row("2026-06-01T00:25:00Z", {"prediction": 11.0}),
+            _prediction_row("2026-06-01T00:45:00Z", {"prediction": 11.0}),
+            _prediction_row("2026-06-01T01:05:00Z", {"prediction": 15.0}),
+        ]
+        return inputs, merged, prediction_rows
+
+    def test_mae_weights_every_bucket_equally_whatever_its_prediction_count(self):
+        inputs, merged, prediction_rows = self._unevenly_predicted_buckets()
+
+        status, name, value, n = _compute_evaluation_metric(
+            self._config(evaluation_metric="mae"), prediction_rows, merged, inputs)
+
+        self.assertEqual("computed", status)
+        # (1 + 5) / 2, not the pooled (1 + 1 + 1 + 5) / 4.
+        self.assertAlmostEqual(3.0, value)
+        self.assertEqual(2, n)
+
+    def test_rmse_weights_every_bucket_equally_whatever_its_prediction_count(self):
+        inputs, merged, prediction_rows = self._unevenly_predicted_buckets()
+
+        status, name, value, n = _compute_evaluation_metric(
+            self._config(evaluation_metric="rmse"), prediction_rows, merged, inputs)
+
+        self.assertEqual("computed", status)
+        # sqrt((1 + 25) / 2), not the pooled sqrt((1 + 1 + 1 + 25) / 4).
+        self.assertAlmostEqual(13.0 ** 0.5, value)
         self.assertEqual(2, n)
 
     def test_bucket_is_assigned_by_truncation_not_rounding(self):

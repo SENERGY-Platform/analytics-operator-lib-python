@@ -541,8 +541,9 @@ def _compute_evaluation_metric(config, prediction_rows, merged, inputs):
     prediction_rows and merged -- and nothing else: no new read, no new
     artefact.
 
-    Returns (status, name, value, n). status is "computed" once a metric was
-    produced, and only then are name/value/n set; otherwise status names why
+    Returns (status, name, value, n). n is the number of resolution buckets
+    scored, not the number of predictions in them. status is "computed" once
+    a metric was produced, and only then are name/value/n set; otherwise status names why
     not and the other three are None. Never raises on a data problem -- an
     unresolvable series, an unknown metric, zero matching predictions -- all
     end in a status reason instead; the caller still guards against a
@@ -586,7 +587,14 @@ def _compute_evaluation_metric(config, prediction_rows, merged, inputs):
     target_frame = merged[merged["topic"] == topic_name]
     bucket_means = _bucket_means(target_frame, dest, resolution_delta)
 
-    errors = []
+    # Each bucket counts once. The replay calls infer() for every message, so
+    # an operator forecasting the next hour answers the same bucket once per
+    # message -- thousands of times an hour at a one-second cadence. Pooling
+    # those errors would weight every bucket by its message rate and report
+    # the message count as n; averaging within a bucket first weights every
+    # bucket equally, and n is the number of buckets scored.
+    sums: typing.Dict[datetime.datetime, float] = {}
+    counts: typing.Dict[datetime.datetime, int] = {}
     for row in prediction_rows:
         # A prediction is a replayed row with both a non-empty result and a
         # non-empty result_time; an empty result is a message that was
@@ -607,19 +615,20 @@ def _compute_evaluation_metric(config, prediction_rows, merged, inputs):
             result_time = clock.parse_time(row["result_time"])
         except ValueError:
             continue
-        actual = bucket_means.get(_bucket_start(result_time, resolution_delta))
+        bucket = _bucket_start(result_time, resolution_delta)
+        actual = bucket_means.get(bucket)
         if actual is None:
             # No actual for this bucket -- the tail of the window, where
             # result_time lands after test_end, is the expected case.
             continue
-        errors.append(predicted - actual)
+        error = predicted - actual
+        sums[bucket] = sums.get(bucket, 0.0) + (abs(error) if metric == "mae" else error * error)
+        counts[bucket] = counts.get(bucket, 0) + 1
 
-    n = len(errors)
+    n = len(counts)
     if n == 0:
         return "no prediction has a matching actual value", None, None, None
 
-    if metric == "mae":
-        value = sum(abs(e) for e in errors) / n
-    else:
-        value = math.sqrt(sum(e * e for e in errors) / n)
+    mean = sum(sums[bucket] / counts[bucket] for bucket in sums) / n
+    value = mean if metric == "mae" else math.sqrt(mean)
     return "computed", metric, value, n
