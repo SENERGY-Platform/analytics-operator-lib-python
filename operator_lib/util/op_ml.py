@@ -314,6 +314,11 @@ class MLOperator(OperatorBase):
                 messages += 1
                 if result is not None:
                     results_count += 1
+                    # A None result timestamp means "now", as in run(), where
+                    # the producer stamps the output with the current time;
+                    # the replay's now is this message's own time.
+                    if dt_result is None:
+                        dt_result = at
                 prediction_rows.append({
                     "time": at.isoformat(),
                     "topic": row["topic"],

@@ -255,6 +255,51 @@ class TestEvaluationMode(unittest.TestCase):
         # The clock is back at training_end once init() has returned.
         self.assertEqual(TRAINING_END, clock.fixed())
 
+    def test_a_result_without_result_time_is_scored_at_its_message_time(self):
+        # infer() returning None as its result timestamp means "now", as in
+        # run(); the replay's now is each message's own time, so every
+        # prediction lands in the bucket of the message that produced it.
+        class _NowcastOperator(_RecordingOperator):
+            def infer(self, model, data, selector, device_id, timestamp):
+                super().infer(model, data, selector, device_id, timestamp)
+                return None, {"prediction": 4.0}, None
+
+        mock_client = _mlflow_client_mock()
+        operator = _NowcastOperator()
+
+        with mock.patch("operator_lib.util.op_ml.ray"), \
+             mock.patch("operator_lib.util.op_ml.mlflow", _mlflow_mock()), \
+             mock.patch("operator_lib.util.op_ml.MlflowClient", return_value=mock_client), \
+             mock.patch("operator_lib.util.op_ml.TrainMlflowLogger", _logger_mock()), \
+             mock.patch(
+                 "operator_lib.util.helpers.data.read_input_window",
+                 return_value=_topics_and_frames(),
+             ):
+            operator.init(
+                kafka_consumer=None,
+                kafka_producer=None,
+                filter_handler=None,
+                output_topic=None,
+                pipeline_id="p",
+                operator_id="o",
+                config=Config({
+                    "training_end": "2026-06-01T00:00:00Z",
+                    "test_end": "2026-06-01T00:05:00Z",
+                    "evaluation_metric": "mae",
+                    "evaluation_target_series": "temp",
+                    "evaluation_prediction_field": "prediction",
+                    "evaluation_resolution": "2m",
+                }),
+            )
+
+        params = {call.args[1]: call.args[2] for call in mock_client.log_param.call_args_list}
+        self.assertEqual("computed", params["evaluation.metric_status"])
+        # temp is 1, 3 and 5 at :00, :02 and :04, so the 2m buckets hold
+        # means 1, 3 and 5; the five messages at :00 to :04 predict 4 and
+        # land in their own buckets: errors 3, 1 and 1 per bucket.
+        self.assertEqual(3, params["evaluation.metric_n"])
+        self.assertAlmostEqual(5.0 / 3.0, params["evaluation.metric_value"])
+
     def test_no_test_end_uses_the_registered_model_and_skips_the_evaluation(self):
         mock_mlflow = _mlflow_mock()
         operator = _RecordingOperator()
