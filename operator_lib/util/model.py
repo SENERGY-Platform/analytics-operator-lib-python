@@ -71,6 +71,14 @@ class Config(simple_struct.Structure):
     evaluation_target_series = None
     evaluation_prediction_field = None
     evaluation_resolution = None
+    # A JSON-encoded string (the flow engine's config values are all strings):
+    # a list of {topic, import_id, export_id, table, columns}, one per import
+    # input whose history the deployer resolved to an analytics-serving export.
+    # The deployer checks the user's permission on the export, so the operator
+    # reads whatever is named here without checking again. An import topic
+    # without an entry is read from Kafka, as before; see
+    # operator_lib.util.helpers.exports.
+    import_exports = None
 
     def __init__(self, d, **kwargs):
         super().__init__(d, **kwargs)

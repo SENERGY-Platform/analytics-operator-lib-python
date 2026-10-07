@@ -35,6 +35,8 @@ than a replacement.
 __all__ = (
     "get_ts_wrapper_dataset_local",
     "get_ts_wrapper_dataset_remote",
+    "get_ts_wrapper_export_dataset_local",
+    "get_ts_wrapper_export_dataset_remote",
     "TimescaleWrapperError",
     "TokenExpiredError",
 )
@@ -47,6 +49,7 @@ import ray
 import requests
 
 from operator_lib.util.model import InputTopic
+from operator_lib.util.helpers.exports import ImportExport, export_column_pairs
 from operator_lib.util.logger import logger
 
 # The layout timescale-wrapper renders timestamps in when asked for it. Sent
@@ -118,6 +121,34 @@ def get_ts_wrapper_dataset_remote(
         wrapper_url, token, conf, duration, require_full_duration, end)
 
 
+def get_ts_wrapper_export_dataset_local(
+    wrapper_url: str,
+    token: str,
+    conf: InputTopic,
+    entry: ImportExport,
+    duration: datetime.timedelta,
+    require_full_duration: bool = False,
+    end: typing.Optional[datetime.datetime] = None,
+) -> ray.data.Dataset:
+    frame = read_export_history(
+        wrapper_url, token, conf, entry, duration, require_full_duration, end)
+    return ray.data.from_pandas(frame)
+
+
+@ray.remote
+def get_ts_wrapper_export_dataset_remote(
+    wrapper_url: str,
+    token: str,
+    conf: InputTopic,
+    entry: ImportExport,
+    duration: datetime.timedelta,
+    require_full_duration: bool = False,
+    end: typing.Optional[datetime.datetime] = None,
+) -> ray.data.Dataset:
+    return get_ts_wrapper_export_dataset_local(
+        wrapper_url, token, conf, entry, duration, require_full_duration, end)
+
+
 def read_history(
     wrapper_url: str,
     token: str,
@@ -135,13 +166,44 @@ def read_history(
     more data against a bound that will not move: `_require_reach` probes once
     and raises instead of `_await_full_duration`'s sleep loop.
     """
+    return _read(wrapper_url, token, conf, None, duration, require_full_duration, end)
+
+
+def read_export_history(
+    wrapper_url: str,
+    token: str,
+    conf: InputTopic,
+    entry: ImportExport,
+    duration: datetime.timedelta,
+    require_full_duration: bool = False,
+    end: typing.Optional[datetime.datetime] = None,
+):
+    """
+    `read_history` for an input topic whose history the deployer resolved to an
+    analytics-serving export: the same frame, the same windows, chunking and
+    `require_full_duration` behaviour, but the element names the export and the
+    rows are kept as the export holds them. See `_decode_export` for why that
+    differs from the device decoding.
+    """
+    return _read(wrapper_url, token, conf, entry, duration, require_full_duration, end)
+
+
+def _read(
+    wrapper_url: str,
+    token: str,
+    conf: InputTopic,
+    entry: typing.Optional[ImportExport],
+    duration: datetime.timedelta,
+    require_full_duration: bool,
+    end: typing.Optional[datetime.datetime],
+):
     import pandas as pd
 
     if require_full_duration:
         if end is not None:
-            _require_reach(wrapper_url, token, conf, duration, end)
+            _require_reach(wrapper_url, token, conf, duration, end, entry)
         else:
-            _await_full_duration(wrapper_url, token, conf, duration)
+            _await_full_duration(wrapper_url, token, conf, duration, entry)
 
     end = end if end is not None else datetime.datetime.now(datetime.timezone.utc)
     start = end - duration
@@ -152,7 +214,7 @@ def read_history(
     while window_start < end:
         window_end = min(window_start + chunk, end)
         rows, chunk = _read_window(
-            wrapper_url, token, conf, window_start, window_end, chunk)
+            wrapper_url, token, conf, window_start, window_end, chunk, entry)
         if rows is not None and not rows.empty:
             frames.append(rows)
         # chunk may have been halved by a refusal, in which case the window that
@@ -161,7 +223,7 @@ def read_history(
             window_start = window_end
         if chunk < MIN_CHUNK:
             raise TimescaleWrapperError(
-                f"timescale-wrapper kept refusing the read for {_describe(conf)} down to "
+                f"timescale-wrapper kept refusing the read for {_describe(conf, entry)} down to "
                 f"{chunk}, which is no longer a size worth negotiating; asking for less "
                 f"will not help, the service or the gateway is the problem")
 
@@ -171,7 +233,12 @@ def read_history(
 
     frame = pd.concat(frames, ignore_index=True)
     frame = frame.sort_values("time", kind="stable").reset_index(drop=True)
-    frame = frame.drop_duplicates(subset=["time"], keep="last").reset_index(drop=True)
+    if entry is None:
+        frame = frame.drop_duplicates(subset=["time"], keep="last").reset_index(drop=True)
+    else:
+        # Whole rows, never the timestamp alone: a forecast export holds one row
+        # per forecasted_for under the same time, and all of them are data.
+        frame = frame.drop_duplicates(keep="first").reset_index(drop=True)
 
     # Ray and PyArrow cannot infer timezone-aware pandas dtypes like
     # datetime64[ns, UTC], the same reason the direct path normalises here.
@@ -189,29 +256,50 @@ def _read_window(
     window_start: datetime.datetime,
     window_end: datetime.datetime,
     chunk: datetime.timedelta,
+    entry: typing.Optional[ImportExport] = None,
 ):
     """
     Read one time window. Returns (frame, chunk); frame is None when the window
     was refused for its size and should be retried at the returned smaller chunk.
     """
-    element = _build_element(conf, window_start, window_end)
+    element = _build_element(conf, window_start, window_end, entry)
     try:
         payload = _post(wrapper_url, token, [element])
     except _OversizedResponse:
         halved = chunk / 2
         logger.warning(
-            f"the gateway refused the read for {_describe(conf)} over "
+            f"the gateway refused the read for {_describe(conf, entry)} over "
             f"{window_start.isoformat()}..{window_end.isoformat()}; retrying with a "
             f"{halved} window")
         return None, halved
-    return _decode(payload, conf), chunk
+    return _decode_for(payload, conf, entry), chunk
+
+
+def _decode_for(payload, conf: InputTopic, entry: typing.Optional[ImportExport]):
+    if entry is None:
+        return _decode(payload, conf)
+    return _decode_export(payload, conf, entry)
 
 
 def _build_element(
     conf: InputTopic,
     window_start: datetime.datetime,
     window_end: datetime.datetime,
+    entry: typing.Optional[ImportExport] = None,
 ) -> typing.Dict[str, typing.Any]:
+    if entry is not None:
+        # Column names are the export's own, looked up per mapping; the time
+        # column is implicit as the first column of every row.
+        return {
+            "exportId": entry.export_id,
+            "columns": [{"name": column} for column, _ in export_column_pairs(entry, conf)],
+            "time": {
+                "start": _format_time(window_start),
+                "end": _format_time(window_end),
+            },
+            "orderColumnIndex": 0,
+            "orderDirection": "asc",
+        }
     return {
         "deviceId": conf.filterValue,
         # The topic carries the service id with colons replaced by underscores,
@@ -313,6 +401,49 @@ def _decode(payload, conf: InputTopic):
     return frame.sort_values("time", kind="stable").reset_index(drop=True)
 
 
+def _decode_export(payload, conf: InputTopic, entry: ImportExport):
+    """
+    Turn one /queries/v2 response element for an export into a frame, one record
+    per response row.
+
+    timescale-wrapper answers a raw query for an export with a single SELECT
+    over all requested columns, so a row is `[time, v1, ..., vn]` and several
+    rows may share a timestamp: a forecast export holds one row per
+    forecasted_for under the same time. `_decode` folds rows by timestamp and
+    would keep one of them, so exports are decoded here without recombining.
+    A row of any other width means the response is not that shape; the values
+    could then only be matched to columns by guessing, so this raises instead.
+    """
+    import pandas as pd
+
+    pairs = export_column_pairs(entry, conf)
+    columns = ["time"] + [dest for _, dest in pairs]
+
+    if not payload:
+        return pd.DataFrame(columns=columns)
+
+    records = []
+    for series in payload[0].get("data") or []:
+        for row in series or []:
+            # An empty or time-less row is the server's marker for "no data".
+            if not row or row[0] is None:
+                continue
+            if len(row) != len(pairs) + 1:
+                raise TimescaleWrapperError(
+                    f"timescale-wrapper answered the read for {_describe(conf, entry)} "
+                    f"with rows of width {len(row)}, expected {len(pairs) + 1} "
+                    f"(time plus {len(pairs)} columns in one wide table); the response "
+                    f"is not in the shape this reader decodes")
+            records.append(list(row))
+
+    if not records:
+        return pd.DataFrame(columns=columns)
+
+    frame = pd.DataFrame(records, columns=columns)
+    frame["time"] = pd.to_datetime(frame["time"], format="ISO8601", utc=True)
+    return frame.sort_values("time", kind="stable").reset_index(drop=True)
+
+
 def _column_targets(column_count: int, series_count: int, series_index: int, row_width: int):
     """
     Which requested column a position in a response row belongs to.
@@ -337,6 +468,7 @@ def _await_full_duration(
     token: str,
     conf: InputTopic,
     duration: datetime.timedelta,
+    entry: typing.Optional[ImportExport] = None,
 ):
     """
     Wait until the series reaches back at least `duration`, matching what the
@@ -344,19 +476,19 @@ def _await_full_duration(
     """
     while True:
         end = datetime.datetime.now(datetime.timezone.utc)
-        element = _build_element(conf, end - duration, end)
+        element = _build_element(conf, end - duration, end, entry)
         element["limit"] = 1
         element["orderDirection"] = "asc"
         try:
-            frame = _decode(_post(wrapper_url, token, [element]), conf)
+            frame = _decode_for(_post(wrapper_url, token, [element]), conf, entry)
         except _OversizedResponse:
             # One row cannot be too large; treat it as the service failing.
             raise TimescaleWrapperError(
                 f"timescale-wrapper could not answer a one-row probe for "
-                f"{_describe(conf)}, so the service rather than the size is the problem")
+                f"{_describe(conf, entry)}, so the service rather than the size is the problem")
         if frame.empty:
             logger.debug(
-                f"no data yet for {_describe(conf)}; waiting {duration} for the full window")
+                f"no data yet for {_describe(conf, entry)}; waiting {duration} for the full window")
             time.sleep(duration.total_seconds())
             continue
         oldest = frame["time"].iloc[0].to_pydatetime()
@@ -365,7 +497,7 @@ def _await_full_duration(
             return
         remaining = (duration - reach).total_seconds()
         logger.debug(
-            f"{_describe(conf)} reaches back {reach}, waiting {remaining}s for {duration}")
+            f"{_describe(conf, entry)} reaches back {reach}, waiting {remaining}s for {duration}")
         time.sleep(remaining)
 
 
@@ -375,6 +507,7 @@ def _require_reach(
     conf: InputTopic,
     duration: datetime.timedelta,
     end: datetime.datetime,
+    entry: typing.Optional[ImportExport] = None,
 ):
     """
     Single-shot counterpart of `_await_full_duration` for a fixed `end`: a bound
@@ -382,28 +515,30 @@ def _require_reach(
     ascending from `end - duration`, and raises ValueError rather than sleeping
     towards a window that will never arrive.
     """
-    element = _build_element(conf, end - duration, end)
+    element = _build_element(conf, end - duration, end, entry)
     element["limit"] = 1
     element["orderDirection"] = "asc"
     try:
-        frame = _decode(_post(wrapper_url, token, [element]), conf)
+        frame = _decode_for(_post(wrapper_url, token, [element]), conf, entry)
     except _OversizedResponse:
         # One row cannot be too large; treat it as the service failing.
         raise TimescaleWrapperError(
             f"timescale-wrapper could not answer a one-row probe for "
-            f"{_describe(conf)}, so the service rather than the size is the problem")
+            f"{_describe(conf, entry)}, so the service rather than the size is the problem")
     if frame.empty:
         raise ValueError(
-            f"no data for {_describe(conf)} in the {duration} before "
+            f"no data for {_describe(conf, entry)} in the {duration} before "
             f"{end.isoformat()}; require_full_duration cannot wait for a fixed end")
     oldest = frame["time"].iloc[0].to_pydatetime()
     reach = end - oldest
     if reach < duration:
         raise ValueError(
-            f"{_describe(conf)} reaches back only {reach} before {end.isoformat()}, "
+            f"{_describe(conf, entry)} reaches back only {reach} before {end.isoformat()}, "
             f"short of the {duration} require_full_duration asked for; "
             f"require_full_duration cannot wait for a fixed end")
 
 
-def _describe(conf: InputTopic) -> str:
+def _describe(conf: InputTopic, entry: typing.Optional[ImportExport] = None) -> str:
+    if entry is not None:
+        return f"export {entry.export_id} of import {conf.filterValue}"
     return f"device {conf.filterValue} service {conf.name.replace('_', ':')}"

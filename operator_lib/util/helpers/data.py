@@ -5,11 +5,20 @@ import operator_lib.util as util
 from operator_lib.util import clock
 from operator_lib.util.model import InputTopic
 from operator_lib.util.helpers.timescale import get_timescale_dataset_local, get_timescale_dataset_remote
+from operator_lib.util.helpers.timescale import get_export_dataset_local, get_export_dataset_remote
 from operator_lib.util.helpers.kafka import get_kafka_dataset_local, get_kafka_dataset_remote
 from operator_lib.util.helpers.ts_wrapper import get_ts_wrapper_dataset_local, get_ts_wrapper_dataset_remote
+from operator_lib.util.helpers.ts_wrapper import get_ts_wrapper_export_dataset_local, get_ts_wrapper_export_dataset_remote
+from operator_lib.util.helpers.exports import find_import_export
 from operator_lib.util.config import MissingConfigValueError
+from operator_lib.util.logger import logger
 
 ALWAYS_PREFER_KAFKA = False # Can be used to debug kafka data source
+
+# Import topics whose chosen source has been logged already. The evaluation
+# replay reads every topic once per message, and one line per read would bury
+# the one line that says where a run's history comes from.
+_logged_import_sources = set()
 
 def provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False) -> typing.List[ray.ObjectRef[ray.data.Dataset]]:
     """
@@ -79,7 +88,28 @@ def __read_topic(config, dep_config, topic, duration, require_full_duration, rem
     local or remote. Shared by __provide_historic_data and read_input_window so
     that the evaluation's fixed-window reads go through exactly the same
     dispatch a deployed operator's do.
+
+    An import topic (filterType ImportId) with an entry in the config's
+    import_exports is read from the export the deployer named, because its
+    Kafka topic keeps days where the export keeps everything. Without an entry
+    it is read from Kafka, as it always was.
     """
+    if topic.filterType == "ImportId":
+        entry = None
+        if ALWAYS_PREFER_KAFKA:
+            reason = "ALWAYS_PREFER_KAFKA is set, reading Kafka"
+        else:
+            # Raises on an unparsable value: only here, for a topic that could
+            # use it, so a device-only operator never trips on it.
+            entry = find_import_export(config, topic)
+            if entry is None:
+                reason = "no entry in import_exports, reading Kafka"
+            else:
+                reason = f"reading export {entry.export_id} (table {entry.table})"
+        _log_import_source_once(topic, reason)
+        if entry is not None:
+            return __read_export(config, dep_config, topic, entry, duration, require_full_duration, remote, end)
+
     if topic.name.startswith("urn_infai_ses_service") and not ALWAYS_PREFER_KAFKA:
         return __read_timescale(config, dep_config, topic, duration, require_full_duration, remote, end)
 
@@ -88,6 +118,41 @@ def __read_topic(config, dep_config, topic, duration, require_full_duration, rem
         f = get_kafka_dataset_remote.remote
     return f(dep_config.config_bootstrap_servers,
         topic, dep_config.pipeline_id, duration, require_full_duration, end)
+
+
+def _log_import_source_once(topic, reason):
+    key = (topic.name, topic.filterValue)
+    if key in _logged_import_sources:
+        return
+    _logged_import_sources.add(key)
+    logger.info(f"import topic {topic.name} ({topic.filterValue}): {reason}")
+
+
+def __read_export(config, dep_config, topic, entry, duration, require_full_duration, remote, end):
+    """
+    Pick the read path for an import topic that has an export, with the same
+    choice as __read_timescale and for the same reasons: the DSN wins where both
+    are present, timescale-wrapper otherwise.
+    """
+    if config.ts_conn:
+        f = get_export_dataset_local
+        if remote:
+            f = get_export_dataset_remote.remote
+        return f(config.ts_conn, topic, entry, duration, require_full_duration, end)
+
+    if config.ts_wrapper_url and dep_config.senergy_token:
+        f = get_ts_wrapper_export_dataset_local
+        if remote:
+            f = get_ts_wrapper_export_dataset_remote.remote
+        return f(config.ts_wrapper_url, dep_config.senergy_token, topic, entry,
+                 duration, require_full_duration, end)
+
+    raise MissingConfigValueError(
+        f"cannot read history for topic {topic.name} from export {entry.export_id}: "
+        f"neither a database connection nor an authorised reader is configured. Set "
+        f"'ts_conn' in the operator config, which is what the flow engine gives a "
+        f"deployed operator, or set 'ts_wrapper_url' together with a SENERGY_TOKEN in "
+        f"the environment, which is what an operator development environment gives a run")
 
 
 def __read_timescale(config, dep_config, topic, duration, require_full_duration, remote, end):

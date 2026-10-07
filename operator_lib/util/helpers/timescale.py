@@ -4,6 +4,7 @@ import ray
 import datetime
 import typing
 from operator_lib.util.model import InputTopic
+from operator_lib.util.helpers.exports import ImportExport, export_column_pairs
 import base64
 import time
 
@@ -58,15 +59,7 @@ def __get_timescale_dataset_query(conn_str: str, conf: InputTopic, duration: dat
         columns.append(
             f"{__quote_identifier(source_path)} AS {__quote_identifier(mapping.dest)}")
 
-    if end is not None:
-        # A fixed bound: read exactly [start, end) instead of [now - duration, now].
-        start = end - duration
-        where = (
-            f"time >= TIMESTAMPTZ '{__timestamptz_literal(start)}' "
-            f"AND time < TIMESTAMPTZ '{__timestamptz_literal(end)}'"
-        )
-    else:
-        where = f"time >= NOW() - INTERVAL '{int(duration.total_seconds())}s'"
+    where = __window_clause(duration, end)
 
     query = f"""
         SELECT
@@ -78,6 +71,23 @@ def __get_timescale_dataset_query(conn_str: str, conf: InputTopic, duration: dat
             {where}
         ORDER BY time ASC
     """
+    __guard_full_duration(conn_str, conf, query, duration, require_full_duration, end)
+    return query
+
+
+def __window_clause(duration: datetime.timedelta, end: typing.Optional[datetime.datetime]) -> str:
+    if end is not None:
+        # A fixed bound: read exactly [start, end) instead of [now - duration, now].
+        start = end - duration
+        return (
+            f"time >= TIMESTAMPTZ '{__timestamptz_literal(start)}' "
+            f"AND time < TIMESTAMPTZ '{__timestamptz_literal(end)}'"
+        )
+    else:
+        return f"time >= NOW() - INTERVAL '{int(duration.total_seconds())}s'"
+
+
+def __guard_full_duration(conn_str: str, conf: InputTopic, query: str, duration: datetime.timedelta, require_full_duration: bool, end: typing.Optional[datetime.datetime]):
     if require_full_duration:
         if end is not None:
             # A fixed end cannot be waited past: probe once and refuse instead
@@ -117,6 +127,52 @@ def __get_timescale_dataset_query(conn_str: str, conf: InputTopic, duration: dat
                 else:
                     time.sleep(duration)  # currently no data -> sleep for full duration
 
+
+@ray.remote
+def get_export_dataset_remote(conn_str: str, conf: InputTopic, entry: ImportExport, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> ray.data.Dataset:
+    query = __get_export_dataset_query(conn_str, conf, entry, duration, require_full_duration, end)
+    ds = ray.data.read_sql(query, lambda: __create_timescale_connection(conn_str), shard_keys=["time"], shard_hash_fn="timestamptz_to_millis", concurrency=4)
+    return ds
+
+
+def get_export_dataset_local(conn_str: str, conf: InputTopic, entry: ImportExport, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> ray.data.Dataset:
+    query = __get_export_dataset_query(conn_str, conf, entry, duration, require_full_duration, end)
+    conn = __create_timescale_connection(conn_str)
+    import pandas as pd
+    import pandas.io.sql as sqlio
+    data = sqlio.read_sql_query(query, conn)
+
+    for col in data.columns:
+        if pd.api.types.is_datetime64tz_dtype(data[col].dtype):
+            data[col] = data[col].dt.tz_convert("UTC").dt.tz_localize(None)
+
+    return ray.data.from_pandas(data)
+
+
+def __get_export_dataset_query(conn_str: str, conf: InputTopic, entry: ImportExport, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> str:
+    # The table is the one the deployer named, not derived: an export table's
+    # name embeds the owner's database id, which is not in the input topic.
+    table_name = __quote_identifier(entry.table)
+    columns = [
+        f"{__quote_identifier(column)} AS {__quote_identifier(dest)}"
+        for column, dest in export_column_pairs(entry, conf)
+    ]
+
+    # DISTINCT over every selected column, not over time. An export does not set
+    # TimestampUnique, so it can hold the same row more than once, and the
+    # duplicates are exact. Rows that merely share a timestamp -- a forecast export holds one row per
+    # forecasted_for under the same time -- differ in some column and stay.
+    query = f"""
+        SELECT DISTINCT
+            time,
+            {", ".join(columns)}
+        FROM
+            {table_name}
+        WHERE
+            {__window_clause(duration, end)}
+        ORDER BY time ASC
+    """
+    __guard_full_duration(conn_str, conf, query, duration, require_full_duration, end)
     return query
 
 
