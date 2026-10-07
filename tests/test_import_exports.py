@@ -292,17 +292,17 @@ class TestExportSql(unittest.TestCase):
 
 
 def _forecast_payload():
-    # One response element, one series, rows of [time, forecasted_for, temp]:
+    # A /queries answer: one series, rows of [time, forecasted_for, temp]:
     # three forecast steps under one timestamp, plus an exact duplicate row. The
     # timestamp lies inside the [E - 1 day, E) window the tests read, because the
     # reader applies the window's lower edge itself.
     t = "2026-06-01T10:00:00.000Z"
-    return [{"data": [[
+    return [[
         [t, "2026-06-01T11:00:00Z", 1.0],
         [t, "2026-06-01T12:00:00Z", 2.0],
         [t, "2026-06-01T13:00:00Z", 3.0],
         [t, "2026-06-01T12:00:00Z", 2.0],
-    ]]}]
+    ]]
 
 
 class TestExportWrapper(unittest.TestCase):
@@ -311,6 +311,11 @@ class TestExportWrapper(unittest.TestCase):
             ts_wrapper.read_export_history(
                 "http://wrapper", "tok", _import_topic(), _entry(), timedelta(days=1), end=E)
         _, _, elements = post.call_args.args
+        # /queries, not /queries/v2: v2 splits the element into one query per
+        # column and the rows of a forecast export would come back in pieces.
+        self.assertEqual("/queries", post.call_args.kwargs["path"])
+        self.assertEqual(
+            {"order_column_index": 0, "order_direction": "asc"}, post.call_args.kwargs["params"])
         element = elements[0]
         self.assertEqual(EXPORT_ID, element["exportId"])
         self.assertEqual(
@@ -322,9 +327,9 @@ class TestExportWrapper(unittest.TestCase):
         self.assertNotIn("serviceId", element)
 
     def test_the_decoder_keeps_every_row_of_a_shared_timestamp(self):
-        payload = [{"data": [[
+        payload = [[
             ["2026-05-31T10:00:00.000Z", f"f{i}", float(i)] for i in range(48)
-        ]]}]
+        ]]
         frame = ts_wrapper._decode_export(payload, _import_topic(), _entry())
         self.assertEqual(48, len(frame))
         self.assertEqual(1, frame["time"].nunique())
@@ -342,11 +347,8 @@ class TestExportWrapper(unittest.TestCase):
         self.assertIsNone(frame["time"].dt.tz)
 
     def test_a_response_that_is_not_wide_raises(self):
-        # One two-wide series per column: the device shape, not an export's.
-        payload = [{"data": [
-            [["2026-05-31T10:00:00.000Z", "a"]],
-            [["2026-05-31T10:00:00.000Z", 1.0]],
-        ]}]
+        # Rows of time and one value for two requested columns.
+        payload = [[["2026-05-31T10:00:00.000Z", "a"]]]
         with self.assertRaises(ts_wrapper.TimescaleWrapperError) as ctx:
             ts_wrapper._decode_export(payload, _import_topic(), _entry())
         self.assertIn("width", str(ctx.exception))
@@ -357,7 +359,7 @@ class TestExportWrapper(unittest.TestCase):
         self.assertEqual(["time", "for", "temp"], list(frame.columns))
 
     def test_require_full_duration_with_a_fixed_end_probes_the_export(self):
-        payload = [{"data": [[["2026-05-31T11:30:00.000Z", "f", 1.0]]]}]
+        payload = [[["2026-05-31T11:30:00.000Z", "f", 1.0]]]
         with mock.patch.object(ts_wrapper, "_post", return_value=payload) as post:
             with self.assertRaises(ValueError):
                 ts_wrapper.read_export_history(
@@ -366,6 +368,16 @@ class TestExportWrapper(unittest.TestCase):
         element = post.call_args.args[2][0]
         self.assertEqual(EXPORT_ID, element["exportId"])
         self.assertEqual(1, element["limit"])
+
+    def test_a_one_row_export_probe_returns_the_oldest_row(self):
+        rows = [E - timedelta(days=d) for d in (3, 2, 1)]
+        post = _strict_wrapper(
+            rows, lambda at, i: [at.strftime("%Y-%m-%dT%H:%M:%S.000Z"), f"f{i}", float(i)])
+        element = ts_wrapper._build_element(_import_topic(), E - timedelta(days=7), E, _entry())
+        element["limit"] = 1
+        with mock.patch.object(ts_wrapper, "_post", side_effect=post):
+            frame = ts_wrapper._query("http://wrapper", "tok", _import_topic(), element, _entry())
+        self.assertEqual([0.0], list(frame["temp"]))
 
     def test_the_device_decoder_is_unchanged(self):
         # The device path still folds rows by timestamp.
@@ -378,14 +390,24 @@ def _strict_wrapper(rows, row_of):
     """
     A stand-in for timescale-wrapper's own filter, `"time" > start AND "time" <
     end`, over a fixed set of rows: what each chunk gets back is decided the way
-    the service decides it, not by the test.
+    the service decides it, not by the test. Each endpoint answers in its own
+    shape: /queries/v2 with one `[time, value]` series per column, /queries with
+    one series of whole rows, sorted by its query parameters (descending unless
+    they say otherwise) and cut to the element's limit after sorting.
     """
-    def post(_url, _token, elements):
+    def post(_url, _token, elements, path="/queries/v2", params=None):
         window = elements[0]["time"]
         start = datetime.datetime.fromisoformat(window["start"].replace("Z", "+00:00"))
         end = datetime.datetime.fromisoformat(window["end"].replace("Z", "+00:00"))
         hit = [row_of(at, i) for i, at in enumerate(rows) if start < at < end]
-        return [{"data": [hit]}]
+        if path == "/queries":
+            descending = (params or {}).get("order_direction", "desc") == "desc"
+            hit.sort(key=lambda row: row[0], reverse=descending)
+            if "limit" in elements[0]:
+                hit = hit[:elements[0]["limit"]]
+            return [hit]
+        columns = len(elements[0]["columns"])
+        return [{"data": [[[row[0], row[1 + c]] for row in hit] for c in range(columns)]}]
     return post
 
 

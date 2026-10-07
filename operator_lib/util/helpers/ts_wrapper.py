@@ -57,9 +57,21 @@ from operator_lib.util.logger import logger
 # back as strings and a layout guessed wrong shifts every timestamp silently.
 TIME_FORMAT = "2006-01-02T15:04:05.000Z07:00"
 
-# The response carries one sub-series per requested column rather than one wide
-# table, which is what keeps a column's own sampling instants intact.
+# One series per query rather than one table merged across them. /queries/v2
+# runs a query per requested column, so a device read comes back as a series
+# per column and each column keeps its own sampling instants; /queries runs one
+# query per element, so an export read comes back as one series of whole rows.
 RESPONSE_FORMAT = "per_query"
+
+# Where an export is read. /queries/v2 splits every element into one query per
+# column before it reaches the database, so an export would come back as a
+# `[time, value]` series per column. A forecast export holds several rows under
+# one time, and series of separately ordered rows cannot be lined up again by
+# timestamp or by position. /queries renders one SELECT over all columns, so
+# each row arrives whole. It sorts its response by the order its query
+# parameters name, not by the element's, hence the explicit ascending order.
+_EXPORT_PATH = "/queries"
+_EXPORT_PARAMS = {"order_column_index": 0, "order_direction": "asc"}
 
 # How much of the requested duration one request asks for.
 #
@@ -273,7 +285,7 @@ def _read_window(
     """
     element = _build_element(conf, window_start - _TIME_RESOLUTION, window_end, entry)
     try:
-        payload = _post(wrapper_url, token, [element])
+        frame = _query(wrapper_url, token, conf, element, entry)
     except _OversizedResponse:
         halved = chunk / 2
         logger.warning(
@@ -281,7 +293,6 @@ def _read_window(
             f"{window_start.isoformat()}..{window_end.isoformat()}; retrying with a "
             f"{halved} window")
         return None, halved
-    frame = _decode_for(payload, conf, entry)
     if not frame.empty:
         frame = frame[frame["time"] >= _floor_to_resolution(window_start)].reset_index(drop=True)
     return frame, chunk
@@ -302,9 +313,16 @@ def _floor_to_resolution(value: datetime.datetime):
     return stamp.floor("ms")
 
 
-def _decode_for(payload, conf: InputTopic, entry: typing.Optional[ImportExport]):
+def _query(
+    wrapper_url: str,
+    token: str,
+    conf: InputTopic,
+    element: typing.Dict[str, typing.Any],
+    entry: typing.Optional[ImportExport],
+):
     if entry is None:
-        return _decode(payload, conf)
+        return _decode(_post(wrapper_url, token, [element]), conf)
+    payload = _post(wrapper_url, token, [element], path=_EXPORT_PATH, params=_EXPORT_PARAMS)
     return _decode_export(payload, conf, entry)
 
 
@@ -357,11 +375,17 @@ class _OversizedResponse(Exception):
     pass
 
 
-def _post(wrapper_url: str, token: str, elements: typing.List[dict]):
-    url = wrapper_url.rstrip("/") + "/queries/v2"
+def _post(
+    wrapper_url: str,
+    token: str,
+    elements: typing.List[dict],
+    path: str = "/queries/v2",
+    params: typing.Optional[typing.Dict[str, typing.Any]] = None,
+):
+    url = wrapper_url.rstrip("/") + path
     response = requests.post(
         url,
-        params={"format": RESPONSE_FORMAT, "time_format": TIME_FORMAT},
+        params={"format": RESPONSE_FORMAT, "time_format": TIME_FORMAT, **(params or {})},
         json=elements,
         headers={"Authorization": f"Bearer {token}"},
         timeout=REQUEST_TIMEOUT_SECONDS,
@@ -430,16 +454,17 @@ def _decode(payload, conf: InputTopic):
 
 def _decode_export(payload, conf: InputTopic, entry: ImportExport):
     """
-    Turn one /queries/v2 response element for an export into a frame, one record
-    per response row.
+    Turn one /queries response for an export into a frame, one record per
+    response row.
 
-    timescale-wrapper answers a raw query for an export with a single SELECT
-    over all requested columns, so a row is `[time, v1, ..., vn]` and several
-    rows may share a timestamp: a forecast export holds one row per
-    forecasted_for under the same time. `_decode` folds rows by timestamp and
-    would keep one of them, so exports are decoded here without recombining.
-    A row of any other width means the response is not that shape; the values
-    could then only be matched to columns by guessing, so this raises instead.
+    /queries answers an element with one series from a single SELECT over all
+    requested columns, so a row is `[time, v1, ..., vn]` and several rows may
+    share a timestamp: a forecast export holds one row per forecasted_for under
+    the same time. `_decode` folds rows by timestamp and would keep one of them,
+    so exports are decoded here without recombining. A row of any other width
+    means the response is not that shape, as a /queries/v2 answer is not; the
+    values could then only be matched to columns by guessing, so this raises
+    instead.
     """
     import pandas as pd
 
@@ -450,18 +475,17 @@ def _decode_export(payload, conf: InputTopic, entry: ImportExport):
         return pd.DataFrame(columns=columns)
 
     records = []
-    for series in payload[0].get("data") or []:
-        for row in series or []:
-            # An empty or time-less row is the server's marker for "no data".
-            if not row or row[0] is None:
-                continue
-            if len(row) != len(pairs) + 1:
-                raise TimescaleWrapperError(
-                    f"timescale-wrapper answered the read for {_describe(conf, entry)} "
-                    f"with rows of width {len(row)}, expected {len(pairs) + 1} "
-                    f"(time plus {len(pairs)} columns in one wide table); the response "
-                    f"is not in the shape this reader decodes")
-            records.append(list(row))
+    for row in payload[0] or []:
+        # An empty or time-less row is the server's marker for "no data".
+        if not row or row[0] is None:
+            continue
+        if len(row) != len(pairs) + 1:
+            raise TimescaleWrapperError(
+                f"timescale-wrapper answered the read for {_describe(conf, entry)} "
+                f"with rows of width {len(row)}, expected {len(pairs) + 1} "
+                f"(time plus {len(pairs)} columns in one wide table); the response "
+                f"is not in the shape this reader decodes")
+        records.append(list(row))
 
     if not records:
         return pd.DataFrame(columns=columns)
@@ -507,7 +531,7 @@ def _await_full_duration(
         element["limit"] = 1
         element["orderDirection"] = "asc"
         try:
-            frame = _decode_for(_post(wrapper_url, token, [element]), conf, entry)
+            frame = _query(wrapper_url, token, conf, element, entry)
         except _OversizedResponse:
             # One row cannot be too large; treat it as the service failing.
             raise TimescaleWrapperError(
@@ -546,7 +570,7 @@ def _require_reach(
     element["limit"] = 1
     element["orderDirection"] = "asc"
     try:
-        frame = _decode_for(_post(wrapper_url, token, [element]), conf, entry)
+        frame = _query(wrapper_url, token, conf, element, entry)
     except _OversizedResponse:
         # One row cannot be too large; treat it as the service failing.
         raise TimescaleWrapperError(
