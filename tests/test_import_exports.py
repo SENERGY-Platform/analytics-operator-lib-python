@@ -293,13 +293,15 @@ class TestExportSql(unittest.TestCase):
 
 def _forecast_payload():
     # One response element, one series, rows of [time, forecasted_for, temp]:
-    # three forecast steps under one timestamp, plus an exact duplicate row.
-    t = "2026-05-31T10:00:00.000Z"
+    # three forecast steps under one timestamp, plus an exact duplicate row. The
+    # timestamp lies inside the [E - 1 day, E) window the tests read, because the
+    # reader applies the window's lower edge itself.
+    t = "2026-06-01T10:00:00.000Z"
     return [{"data": [[
-        [t, "2026-05-31T11:00:00Z", 1.0],
-        [t, "2026-05-31T12:00:00Z", 2.0],
-        [t, "2026-05-31T13:00:00Z", 3.0],
-        [t, "2026-05-31T12:00:00Z", 2.0],
+        [t, "2026-06-01T11:00:00Z", 1.0],
+        [t, "2026-06-01T12:00:00Z", 2.0],
+        [t, "2026-06-01T13:00:00Z", 3.0],
+        [t, "2026-06-01T12:00:00Z", 2.0],
     ]]}]
 
 
@@ -370,6 +372,47 @@ class TestExportWrapper(unittest.TestCase):
         payload = [{"data": [[["2026-05-31T10:00:00.000Z", 1.0], ["2026-05-31T10:00:00.000Z", 2.0]]]}]
         frame = ts_wrapper._decode(payload, _device_topic())
         self.assertEqual(1, len(frame))
+
+
+def _strict_wrapper(rows, row_of):
+    """
+    A stand-in for timescale-wrapper's own filter, `"time" > start AND "time" <
+    end`, over a fixed set of rows: what each chunk gets back is decided the way
+    the service decides it, not by the test.
+    """
+    def post(_url, _token, elements):
+        window = elements[0]["time"]
+        start = datetime.datetime.fromisoformat(window["start"].replace("Z", "+00:00"))
+        end = datetime.datetime.fromisoformat(window["end"].replace("Z", "+00:00"))
+        hit = [row_of(at, i) for i, at in enumerate(rows) if start < at < end]
+        return [{"data": [hit]}]
+    return post
+
+
+class TestChunkBoundaries(unittest.TestCase):
+    # Rows on every day boundary of a 14-day window, read in 7-day chunks: the
+    # start, the one chunk boundary, and the end (which the window excludes).
+    ROWS = [E - timedelta(days=d) for d in range(14, -1, -1)]
+
+    def _iso(self, at):
+        return at.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+    def test_an_export_row_on_a_chunk_boundary_is_read_exactly_once(self):
+        post = _strict_wrapper(self.ROWS, lambda at, i: [self._iso(at), f"f{i}", float(i)])
+        with mock.patch.object(ts_wrapper, "_post", side_effect=post):
+            frame = ts_wrapper.read_export_history(
+                "http://wrapper", "tok", _import_topic(), _entry(), timedelta(days=14), end=E)
+        # Every row in [E - 14 days, E): 14 of them, the one at E excluded.
+        self.assertEqual(14, len(frame))
+        self.assertEqual(list(range(14)), [int(v) for v in frame["temp"]])
+
+    def test_a_device_row_on_a_chunk_boundary_is_read_exactly_once(self):
+        post = _strict_wrapper(self.ROWS, lambda at, i: [self._iso(at), float(i)])
+        with mock.patch.object(ts_wrapper, "_post", side_effect=post):
+            frame = ts_wrapper.read_history(
+                "http://wrapper", "tok", _device_topic(), timedelta(days=14), end=E)
+        self.assertEqual(14, len(frame))
+        self.assertEqual(list(range(14)), [int(v) for v in frame["temp"]])
 
 
 class TestReadInputWindow(unittest.TestCase):

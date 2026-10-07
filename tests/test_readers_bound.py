@@ -54,8 +54,11 @@ class TestTsWrapperBound(unittest.TestCase):
         post.assert_called_once()
         _, _, elements = post.call_args.args
         self.assertEqual(1, len(elements))
+        # One millisecond before the window: the wrapper's lower bound is strict,
+        # and the reader cuts back to [E - 7 days, E) itself (_read_window).
         self.assertEqual(
-            ts_wrapper._format_time(E - timedelta(days=7)), elements[0]["time"]["start"])
+            ts_wrapper._format_time(E - timedelta(days=7, milliseconds=1)),
+            elements[0]["time"]["start"])
         self.assertEqual(ts_wrapper._format_time(E), elements[0]["time"]["end"])
 
     def test_require_full_duration_with_a_fixed_end_raises_on_short_reach(self):

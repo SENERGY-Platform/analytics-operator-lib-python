@@ -261,8 +261,17 @@ def _read_window(
     """
     Read one time window. Returns (frame, chunk); frame is None when the window
     was refused for its size and should be retried at the returned smaller chunk.
+
+    The frame covers exactly [window_start, window_end). timescale-wrapper renders
+    `"time" > start AND "time" < end`, strict on both sides, so a row stamped
+    exactly on a chunk boundary would belong to neither the chunk ending there nor
+    the one starting there. That is not a corner case: a split's bounds are whole
+    hours, the chunks are whole days, and an import that stamps by issue time
+    stamps every row on a whole hour. So the request starts one millisecond -- the
+    wrapper's time resolution -- earlier, and the window's own lower edge is
+    applied here.
     """
-    element = _build_element(conf, window_start, window_end, entry)
+    element = _build_element(conf, window_start - _TIME_RESOLUTION, window_end, entry)
     try:
         payload = _post(wrapper_url, token, [element])
     except _OversizedResponse:
@@ -272,7 +281,25 @@ def _read_window(
             f"{window_start.isoformat()}..{window_end.isoformat()}; retrying with a "
             f"{halved} window")
         return None, halved
-    return _decode_for(payload, conf, entry), chunk
+    frame = _decode_for(payload, conf, entry)
+    if not frame.empty:
+        frame = frame[frame["time"] >= _floor_to_resolution(window_start)].reset_index(drop=True)
+    return frame, chunk
+
+
+# The resolution timestamps travel at, both ways: _format_time renders
+# milliseconds and the wrapper answers in TIME_FORMAT, which has milliseconds.
+_TIME_RESOLUTION = datetime.timedelta(milliseconds=1)
+
+
+def _floor_to_resolution(value: datetime.datetime):
+    # The same truncation _format_time applies, so that a window's lower edge as
+    # applied here is the edge the previous window's upper bound was sent as.
+    import pandas as pd
+
+    stamp = pd.Timestamp(value)
+    stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+    return stamp.floor("ms")
 
 
 def _decode_for(payload, conf: InputTopic, entry: typing.Optional[ImportExport]):
