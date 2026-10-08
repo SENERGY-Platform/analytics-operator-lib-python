@@ -84,14 +84,13 @@ class OperatorBase:
                             dt_result = None
                             run_result = ret
                         if run_result is not None:
+                            # one timestamp per result, which __route pairs them by
                             if isinstance(run_result, list):
                                 run_results += run_result
+                                dt_results += [dt_result] * len(run_result)
                             else:
                                 run_results.append(run_result)
-                            if isinstance(dt_result, list):
-                                dt_results += dt_result
-                            else:
-                                dt_results.append(dt_result)                          
+                                dt_results.append(dt_result)
                 else:
                     logger.error(result.ex)
                     self.__handle_result_error(result.ex, message, self.produce, device_id)
