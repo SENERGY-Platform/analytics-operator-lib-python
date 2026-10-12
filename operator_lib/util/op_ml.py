@@ -42,6 +42,11 @@ from ray.runtime_env import RuntimeEnv
 import mlflow
 
 
+def _runtime_env():
+    # Workers import mlflow through the operator's code, not through this package.
+    return {"env_vars": {"MLFLOW_DISABLE_TELEMETRY": os.environ.get("MLFLOW_DISABLE_TELEMETRY", "true")}}
+
+
 class MLOperator(OperatorBase):
     def init(self, *args, **kwargs):
         super().init(*args, **kwargs)
@@ -171,7 +176,7 @@ class MLOperator(OperatorBase):
         with self.__mlflow_logger.trace("ray init"):
             logger.debug(
                 f"Initializing Ray. This might take a while, even if you see log messages below...")
-            ray.init(address=self.config.ray_url)
+            ray.init(address=self.config.ray_url, runtime_env=_runtime_env())
         with self.__mlflow_logger.trace("train"):
             model = self.train(self.model, self.__mlflow_logger)
         ray.shutdown()
@@ -262,7 +267,7 @@ class MLOperator(OperatorBase):
         merged = pd.DataFrame(columns=["time", "topic", "selector", "device_id"])
         completed = False
         try:
-            ray.init(address=self.config.ray_url)
+            ray.init(address=self.config.ray_url, runtime_env=_runtime_env())
             # Lazy imports: operator_lib.util.helpers is already pulled in as a
             # side effect of the TrainMlflowLogger import at the top of this
             # module, which is what makes read_input_window safe to import

@@ -14,10 +14,16 @@
    limitations under the License.
 """
 
-__version__ = 'v1.8.1'
+__version__ = 'v1.8.3'
 __title__ = 'operator-lib'
 __description__ = 'Library for users wanting to implement analytics operators in python.'
 __url__ = 'https://github.com/SENERGY-Platform/analytics-operator-lib-python'
 __author__ = 'InfAI (CC SES)'
 __license__ = 'Apache License 2.0'
 __copyright__ = 'Copyright 2024 InfAI (CC SES)'
+
+import os
+
+# MLflow decides at its first import whether it reports usage to its vendor; an operator
+# sends nothing there unless it sets the variable itself.
+os.environ.setdefault('MLFLOW_DISABLE_TELEMETRY', 'true')
