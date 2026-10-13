@@ -35,8 +35,8 @@ class OperatorLib:
         config_json = util.load_operator_config_json(dep_config)
         opr_config = util.OperatorConfig(config_json)
         util.init_logger(opr_config.config.logger_level, name, util.parse_baggage(dep_config.baggage))
-        util.logger.debug(f"deployment config: {dep_config}")
-        util.logger.debug(f"operator config: {opr_config}")
+        util.logger.debug(f"deployment config: {util.redact_config(dep_config)}")
+        util.logger.debug(f"operator config: {util.redact_config(opr_config)}")
         filter_handler = util.create_filter_handler(opr_config.inputTopics, dep_config.pipeline_id, operator.selectors)
         util.logger.info(f"Directly bootstrapping kafka: {dep_config.config_bootstrap_servers}")
         kafka_consumer_config = {

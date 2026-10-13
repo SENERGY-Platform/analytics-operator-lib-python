@@ -19,12 +19,15 @@ __all__ = (
     "MissingDeploymentConfigError",
     "MissingConfigValueError",
     "load_operator_config_json",
+    "redact_config",
     "require_config",
 )
 
 import json
+import re
 
 import sevm
+import simple_struct
 
 
 class DeploymentConfig(sevm.Config):
@@ -46,6 +49,9 @@ class DeploymentConfig(sevm.Config):
     # credential with its own lifetime, and it is renewed independently of the
     # configuration a deployment was started with.
     senergy_token = None
+    # The Timescale DSN, from a Kubernetes Secret, because in CONFIG anyone who can
+    # read the pod reads the password. Wins over 'ts_conn' in the operator config.
+    ts_conn = None
     # The OpenTelemetry baggage of the request that started this pipeline, as a W3C
     # baggage header. Put into every log record so a line from this operator can be
     # traced back to the caller's context, for instance to a smart service instance.
@@ -86,3 +92,50 @@ def require_config(value, name: str, purpose: str):
         raise MissingConfigValueError(
             f"config value '{name}' is not set, it is required to {purpose}")
     return value
+
+
+_SECRET_KEYS = ("ts_conn", "senergy_token")
+_SECRET_KEY_PARTS = ("password", "secret", "token")
+_MASK = "***"
+_URL_USERINFO = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?P<user>[^\s:/@\"']*):[^\s/\"']*@")
+_KEYWORD_PASSWORD = re.compile(r"(?i)(\bpassword\s*=\s*)('(?:[^'\\]|\\.)*'|[^\s\"',}]+)")
+
+
+def redact_config(value):
+    """
+    Return a printable copy of a config with credentials masked, for logging.
+
+    Masked are the values of 'ts_conn', 'senergy_token' and any key containing
+    'password', 'secret' or 'token', and the password of a URL userinfo or a
+    'password=' pair inside any other string. A string holding JSON, such as
+    CONFIG, is masked by key as well.
+    """
+    return _redact(value, None)
+
+
+def _redact(value, key):
+    if value is not None and key is not None:
+        lowered = str(key).lower()
+        if lowered in _SECRET_KEYS or any(part in lowered for part in _SECRET_KEY_PARTS):
+            return _MASK
+    if hasattr(value, "__todict__"):
+        value = value.__todict__()
+    elif isinstance(value, simple_struct.Structure):
+        value = dict(value)
+    if isinstance(value, dict):
+        return {k: _redact(v, k) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_redact(v, None) for v in value]
+    if isinstance(value, str):
+        return _redact_string(value)
+    return value
+
+
+def _redact_string(value: str) -> str:
+    if value.lstrip()[:1] in ("{", "["):
+        try:
+            return json.dumps(_redact(json.loads(value), None))
+        except ValueError:
+            pass
+    value = _URL_USERINFO.sub(lambda m: f"{m.group('scheme')}{m.group('user')}:{_MASK}@", value)
+    return _KEYWORD_PASSWORD.sub(lambda m: m.group(1) + _MASK, value)

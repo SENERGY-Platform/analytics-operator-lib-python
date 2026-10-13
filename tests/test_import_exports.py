@@ -146,7 +146,7 @@ class TestDispatch(unittest.TestCase):
     def setUp(self):
         data._logged_import_sources.clear()
         self.dep = types.SimpleNamespace(
-            senergy_token=None, config_bootstrap_servers="kafka:9092", pipeline_id="p")
+            ts_conn=None, senergy_token=None, config_bootstrap_servers="kafka:9092", pipeline_id="p")
         self.read_topic = getattr(data, "__read_topic")
         patches = {
             "get_export_dataset_local": mock.patch.object(data, "get_export_dataset_local"),
@@ -456,7 +456,7 @@ class TestReadInputWindow(unittest.TestCase):
             }],
         }
         dep = types.SimpleNamespace(
-            config=json.dumps(operator_config), senergy_token="tok",
+            config=json.dumps(operator_config), ts_conn=None, senergy_token="tok",
             config_bootstrap_servers="kafka:9092", pipeline_id="p")
         fake_ds = lambda frame: types.SimpleNamespace(to_pandas=lambda: frame)
         with mock.patch.object(util, "DeploymentConfig", return_value=dep), \

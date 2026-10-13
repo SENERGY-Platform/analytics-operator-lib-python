@@ -128,17 +128,27 @@ def _log_import_source_once(topic, reason):
     logger.info(f"import topic {topic.name} ({topic.filterValue}): {reason}")
 
 
+def _resolve_ts_conn(config, dep_config):
+    """
+    The database connection string: TS_CONN from the environment where set, else
+    'ts_conn' of the operator config, which a flow engine that does not yet use a
+    Secret still hands over.
+    """
+    return dep_config.ts_conn or config.ts_conn
+
+
 def __read_export(config, dep_config, topic, entry, duration, require_full_duration, remote, end):
     """
     Pick the read path for an import topic that has an export, with the same
     choice as __read_timescale and for the same reasons: the DSN wins where both
     are present, timescale-wrapper otherwise.
     """
-    if config.ts_conn:
+    ts_conn = _resolve_ts_conn(config, dep_config)
+    if ts_conn:
         f = get_export_dataset_local
         if remote:
             f = get_export_dataset_remote.remote
-        return f(config.ts_conn, topic, entry, duration, require_full_duration, end)
+        return f(ts_conn, topic, entry, duration, require_full_duration, end)
 
     if config.ts_wrapper_url and dep_config.senergy_token:
         f = get_ts_wrapper_export_dataset_local
@@ -150,8 +160,8 @@ def __read_export(config, dep_config, topic, entry, duration, require_full_durat
     raise MissingConfigValueError(
         f"cannot read history for topic {topic.name} from export {entry.export_id}: "
         f"neither a database connection nor an authorised reader is configured. Set "
-        f"'ts_conn' in the operator config, which is what the flow engine gives a "
-        f"deployed operator, or set 'ts_wrapper_url' together with a SENERGY_TOKEN in "
+        f"TS_CONN in the environment, or 'ts_conn' in the operator config, which is what "
+        f"the flow engine gives a deployed operator, or set 'ts_wrapper_url' together with a SENERGY_TOKEN in "
         f"the environment, which is what an operator development environment gives a run")
 
 
@@ -169,11 +179,12 @@ def __read_timescale(config, dep_config, topic, duration, require_full_duration,
     The DSN wins where both are present, because it is the faster path -- it
     shards the read across ray workers, which one HTTP response cannot.
     """
-    if config.ts_conn:
+    ts_conn = _resolve_ts_conn(config, dep_config)
+    if ts_conn:
         f = get_timescale_dataset_local
         if remote:
             f = get_timescale_dataset_remote.remote
-        return f(config.ts_conn, topic, duration, require_full_duration, end)
+        return f(ts_conn, topic, duration, require_full_duration, end)
 
     if config.ts_wrapper_url and dep_config.senergy_token:
         f = get_ts_wrapper_dataset_local
@@ -184,7 +195,7 @@ def __read_timescale(config, dep_config, topic, duration, require_full_duration,
 
     raise MissingConfigValueError(
         f"cannot read history for topic {topic.name}: neither a database connection "
-        f"nor an authorised reader is configured. Set 'ts_conn' in the operator "
-        f"config, which is what the flow engine gives a deployed operator, or set "
-        f"'ts_wrapper_url' together with a SENERGY_TOKEN in the environment, which "
+        f"nor an authorised reader is configured. Set TS_CONN in the "
+        f"environment, or 'ts_conn' in the operator config, which is what the flow "
+        f"engine gives a deployed operator, or set 'ts_wrapper_url' together with a SENERGY_TOKEN in the environment, which "
         f"is what an operator development environment gives a run")
