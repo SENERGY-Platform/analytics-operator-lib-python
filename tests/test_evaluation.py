@@ -883,8 +883,10 @@ class TestEvaluationMetric(unittest.TestCase):
             self._config(evaluation_target_series="sensor.DOES.NOT.EXIST"),
             prediction_rows, inputs, [])
 
-        self.assertEqual(
-            "target series 'sensor.DOES.NOT.EXIST' matches no input topic", status)
+        # The status reaches the assistant as a param, so it never names the
+        # developer's series.
+        self.assertEqual("target series matches no input or training topic", status)
+        self.assertNotIn("sensor.DOES.NOT.EXIST", status)
         self.assertIsNone(name)
         self.assertIsNone(value)
         self.assertIsNone(n)
@@ -903,9 +905,8 @@ class TestEvaluationMetric(unittest.TestCase):
         status, name, value, n = _compute_evaluation_metric(
             self._config(), prediction_rows, inputs, [])
 
-        self.assertEqual(
-            "target series 'sensor.ENERGY.Power' matches 2 mappings, expected exactly one",
-            status)
+        self.assertEqual("target series matches 2 mappings, expected exactly one", status)
+        self.assertNotIn("sensor.ENERGY.Power", status)
         self.assertIsNone(name)
         self.assertIsNone(value)
         self.assertIsNone(n)

@@ -529,6 +529,11 @@ def _resolve_target_series(target_series, inputs, training):
     sub-meter of one model -- and a lookup by name would score the wrong
     device. `error` names why zero or more than one mapping matched; a match
     is reported per mapping rather than per topic.
+
+    `error` never names the series itself. It becomes evaluation.metric_status,
+    a param ODE hands to the assistant, and the series is the developer's
+    answer to a choice the assistant is meant to make on its own; the
+    developer reads it in their own evaluation.yaml.
     """
     from operator_lib.util.helpers.ts_wrapper import _source_path
 
@@ -539,11 +544,10 @@ def _resolve_target_series(target_series, inputs, training):
                 matches.append((frame, mapping.dest))
 
     if not matches:
-        return None, None, f"target series '{target_series}' matches no input topic"
+        return None, None, "target series matches no input or training topic"
     if len(matches) > 1:
         return None, None, (
-            f"target series '{target_series}' matches {len(matches)} mappings, "
-            f"expected exactly one")
+            f"target series matches {len(matches)} mappings, expected exactly one")
     frame, dest = matches[0]
     return frame, dest, None
 

@@ -480,8 +480,8 @@ class TestTargetResolution(unittest.TestCase):
 
         status, name, value, n = _compute_evaluation_metric(self._config(), rows, inputs, training)
 
-        self.assertEqual(
-            "target series 'root.egy_watt' matches 2 mappings, expected exactly one", status)
+        self.assertEqual("target series matches 2 mappings, expected exactly one", status)
+        self.assertNotIn("root.egy_watt", status)
         self.assertIsNone(value)
 
     def test_a_training_topic_sharing_its_name_with_an_input_topic_is_scored_against_its_own_frame(self):
@@ -519,7 +519,8 @@ class TestTargetResolution(unittest.TestCase):
         status, _, _, _ = _compute_evaluation_metric(
             self._config(target_series="sensor.DOES.NOT.EXIST"), [], inputs, training)
 
-        self.assertEqual("target series 'sensor.DOES.NOT.EXIST' matches no input topic", status)
+        self.assertEqual("target series matches no input or training topic", status)
+        self.assertNotIn("sensor.DOES.NOT.EXIST", status)
 
 
 if __name__ == "__main__":
