@@ -266,6 +266,10 @@ class MLOperator(OperatorBase):
         import pandas as pd
         merged = pd.DataFrame(columns=["time", "topic", "selector", "device_id"])
         completed = False
+        # Imported before the try, unlike the two lazy imports inside it: the
+        # finally below lifts the withholding again, and must not fail on a
+        # name the try never got as far as binding.
+        from .helpers.data import withhold_training_topics
         try:
             ray.init(address=self.config.ray_url, runtime_env=_runtime_env())
             # Lazy imports: operator_lib.util.helpers is already pulled in as a
@@ -279,6 +283,13 @@ class MLOperator(OperatorBase):
             from operator_lib.util import get_selector
 
             inputs = read_input_window(training_end, test_end)
+            # The training topics over the same window, for the metric alone:
+            # they are the ground truth a deployed operator never receives, so
+            # none of their rows enters `merged` below, reaches get_selector or
+            # is handed to infer(). Read here rather than in the finally,
+            # because the readers build Ray datasets, which need the instance
+            # the finally shuts down.
+            training = read_input_window(training_end, test_end, role="training")
             dests_by_topic = {}
             frames = []
             for topic, frame in inputs:
@@ -301,6 +312,11 @@ class MLOperator(OperatorBase):
                 # equal times.
                 merged = merged.sort_values("time", kind="stable").reset_index(drop=True)
 
+            # From here to the finally, provide_historic_data(role="training")
+            # raises: keeping the training topics out of `merged` is not
+            # enough while infer() can still fetch them itself, up to each
+            # message's own time, and be scored against what it fetched.
+            withhold_training_topics(True)
             total = len(merged)
             for _, row in merged.iterrows():
                 at = _as_utc(row["time"])
@@ -338,6 +354,7 @@ class MLOperator(OperatorBase):
             completed = True
         finally:
             clock.set_fixed(training_end)
+            withhold_training_topics(False)
             ray.shutdown()
 
             # Recorded through MlflowClient against the explicit run_id
@@ -365,20 +382,21 @@ class MLOperator(OperatorBase):
             client.log_param(run_id, "evaluation.window_end", test_end.isoformat())
 
             # The test-window metric, from what is already in memory above --
-            # prediction_rows and merged -- and nothing else: no new read, no
-            # new artefact. `inputs` is read too, for the mapping source that
-            # resolves evaluation_target_series; it was built before this
-            # try's loop and is still in scope here, but may not exist at all
-            # if the run failed before that point, which is one more reason
-            # this whole call is guarded rather than trusted. A failure here
-            # must not fail the replay that already completed (or already
-            # failed for its own reason, which this must not shadow) -- so it
-            # is caught and turned into the status reason instead of
-            # propagating.
+            # prediction_rows, and the frames `inputs` and `training` hold --
+            # and nothing else: no new read, no new artefact. The two lists
+            # carry the mapping sources that resolve evaluation_target_series
+            # and the frame of whichever topic it resolves to. Both were built
+            # before this try's loop and are still in scope here, but may not
+            # exist at all if the run failed before that point, which is one
+            # more reason this whole call is guarded rather than trusted. A
+            # failure here must not fail the replay that already completed
+            # (or already failed for its own reason, which this must not
+            # shadow) -- so it is caught and turned into the status reason
+            # instead of propagating.
             try:
                 metric_status, metric_name, metric_value, metric_n = \
                     _compute_evaluation_metric(
-                        self.config, prediction_rows, merged, inputs)
+                        self.config, prediction_rows, inputs, training)
             except Exception as ex:
                 logger.exception(
                     "evaluation: metric computation raised; logging the "
@@ -490,31 +508,35 @@ def _bucket_start(at: datetime.datetime, resolution: datetime.timedelta) -> date
     return _BUCKET_EPOCH + (elapsed // resolution) * resolution
 
 
-def _resolve_target_series(target_series, inputs):
+def _resolve_target_series(target_series, inputs, training):
     """
-    Resolve a platform path against every input topic mapping's `source`,
-    dropping its first path element the same way
+    Resolve a platform path against every input and training topic mapping's
+    `source`, dropping its first path element the same way
     helpers/ts_wrapper.py's `_source_path` does when it turns a mapping
     source into the column name it asks timescale-wrapper for -- the same
     identity ODE and the wrapper already agree on, not a second rule invented
     here.
 
-    `inputs` is the (InputTopic, frame) list __evaluate already built before
-    the replay loop; no new read happens to answer this.
+    `inputs` and `training` are the (InputTopic, frame) lists __evaluate
+    already read before the replay loop; no new read happens to answer this.
+    Both are searched as one: a label assigned as a training topic is the
+    usual target, but an input topic can still be one, as it always could.
 
-    Returns (topic_name, dest, error): exactly one of the pair or `error` is
-    not None. `error` names why zero or more than one mapping matched --
-    topic names are taken as unique among one operator's input topics, the
-    same assumption dests_by_topic above already makes, so a match is
-    reported per mapping rather than per topic.
+    Returns (frame, dest, error): exactly one of the pair or `error` is not
+    None. The frame is the one read for the matched topic itself, not rows
+    looked up again by topic name: a training topic may share its name with
+    an input topic -- two devices of the same service, a main meter and a
+    sub-meter of one model -- and a lookup by name would score the wrong
+    device. `error` names why zero or more than one mapping matched; a match
+    is reported per mapping rather than per topic.
     """
     from operator_lib.util.helpers.ts_wrapper import _source_path
 
     matches = []
-    for topic, _frame in inputs:
+    for topic, frame in list(inputs) + list(training):
         for mapping in topic.mappings:
             if mapping.source and _source_path(mapping.source) == target_series:
-                matches.append((topic.name, mapping.dest))
+                matches.append((frame, mapping.dest))
 
     if not matches:
         return None, None, f"target series '{target_series}' matches no input topic"
@@ -522,16 +544,16 @@ def _resolve_target_series(target_series, inputs):
         return None, None, (
             f"target series '{target_series}' matches {len(matches)} mappings, "
             f"expected exactly one")
-    topic_name, dest = matches[0]
-    return topic_name, dest, None
+    frame, dest = matches[0]
+    return frame, dest, None
 
 
 def _bucket_means(frame, dest: str, resolution: datetime.timedelta) -> typing.Dict[datetime.datetime, float]:
     """
-    The mean of `dest` in `frame` -- already filtered to the target series'
-    own topic -- grouped by the bucket its `time` falls into. A row whose
-    value is missing or not numeric (see _plain_value) does not enter its
-    bucket's mean at all, rather than counting as zero.
+    The mean of `dest` in `frame` -- the target series' own topic, as read --
+    grouped by the bucket its `time` falls into. A row whose value is missing
+    or not numeric (see _plain_value) does not enter its bucket's mean at
+    all, rather than counting as zero.
     """
     sums: typing.Dict[datetime.datetime, float] = {}
     counts: typing.Dict[datetime.datetime, int] = {}
@@ -545,11 +567,13 @@ def _bucket_means(frame, dest: str, resolution: datetime.timedelta) -> typing.Di
     return {bucket: sums[bucket] / counts[bucket] for bucket in sums}
 
 
-def _compute_evaluation_metric(config, prediction_rows, merged, inputs):
+def _compute_evaluation_metric(config, prediction_rows, inputs, training):
     """
-    The test-window metric, from what the replay already holds in memory --
-    prediction_rows and merged -- and nothing else: no new read, no new
-    artefact.
+    The test-window metric, from what the evaluation already holds in memory
+    -- prediction_rows, and the (InputTopic, frame) lists `inputs` and
+    `training` it read over the test window -- and nothing else: no new read,
+    no new artefact. The actuals come from the frame of the one topic
+    evaluation_target_series resolves to; see _resolve_target_series.
 
     Returns (status, name, value, n). n is the number of resolution buckets
     scored, not the number of predictions in them. status is "computed" once
@@ -590,11 +614,10 @@ def _compute_evaluation_metric(config, prediction_rows, merged, inputs):
     if resolution_delta <= datetime.timedelta(0):
         return f"invalid resolution '{resolution}': not a positive duration", None, None, None
 
-    topic_name, dest, error = _resolve_target_series(target_series, inputs)
+    target_frame, dest, error = _resolve_target_series(target_series, inputs, training)
     if error is not None:
         return error, None, None, None
 
-    target_frame = merged[merged["topic"] == topic_name]
     bucket_means = _bucket_means(target_frame, dest, resolution_delta)
 
     # Each bucket counts once. The replay calls infer() for every message, so

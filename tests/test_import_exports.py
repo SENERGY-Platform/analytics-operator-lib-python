@@ -471,6 +471,46 @@ class TestReadInputWindow(unittest.TestCase):
         self.assertEqual(3, len(frame))
         self.assertEqual(["time", "for", "temp"], list(frame.columns))
 
+    def test_an_import_training_topic_with_an_entry_returns_the_export_rows(self):
+        # A training topic goes through the same dispatch as an input topic,
+        # import_exports lookup included; the device input next to it is not
+        # read at all for role="training".
+        operator_config = {
+            "config": {
+                "ts_wrapper_url": "http://wrapper",
+                "import_exports": json.dumps([_entry_dict()]),
+            },
+            "inputTopics": [{
+                "name": f"urn_infai_ses_service_{SERVICE_UUID}", "filterType": "DeviceId",
+                "filterValue": DEVICE_ID, "mappings": [{"dest": "x", "source": "value.x"}],
+            }],
+            "trainingTopics": [{
+                "name": IMPORT_TOPIC, "filterType": "ImportId", "filterValue": IMPORT_ID,
+                "mappings": [
+                    {"dest": "for", "source": "value.forecasted_for"},
+                    {"dest": "temp", "source": "value.instant_air_temperature"},
+                ],
+            }],
+        }
+        dep = types.SimpleNamespace(
+            config=json.dumps(operator_config), ts_conn=None, senergy_token="tok",
+            config_bootstrap_servers="kafka:9092", pipeline_id="p")
+        fake_ds = lambda frame: types.SimpleNamespace(to_pandas=lambda: frame)
+        with mock.patch.object(util, "DeploymentConfig", return_value=dep), \
+             mock.patch.object(ts_wrapper, "_post", return_value=_forecast_payload()) as post, \
+             mock.patch.object(ts_wrapper.ray.data, "from_pandas", side_effect=fake_ds), \
+             mock.patch.object(data, "get_kafka_dataset_local") as kafka:
+            result = data.read_input_window(E - timedelta(days=1), E, role="training")
+        kafka.assert_not_called()
+        # One request, for the export: the device input was never read.
+        post.assert_called_once()
+        self.assertEqual(EXPORT_ID, post.call_args.args[2][0]["exportId"])
+        self.assertEqual(1, len(result))
+        topic, frame = result[0]
+        self.assertEqual(IMPORT_TOPIC, topic.name)
+        self.assertEqual(3, len(frame))
+        self.assertEqual(["time", "for", "temp"], list(frame.columns))
+
 
 if __name__ == "__main__":
     unittest.main()

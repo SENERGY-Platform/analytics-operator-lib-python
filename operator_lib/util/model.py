@@ -119,7 +119,21 @@ class InputTopic(simple_struct.Structure):
 class OperatorConfig(simple_struct.Structure):
     config = Config
     inputTopics: typing.List[InputTopic] = None
+    # Same shape as inputTopics, written by an Operator Development
+    # Environment launch for a series the operator may learn from but never
+    # receives: a label that is missing at runtime, such as a sub-meter behind
+    # the main meter the operator reads. provide_historic_data(role="training")
+    # reads these, and the evaluation scores against them under a data split.
+    # They are never subscribed live -- OperatorLib builds its filters from
+    # inputTopics alone -- and never replayed through infer().
+    #
+    # The flow engine does not write the key, so a deployed operator gets an
+    # empty list, as it does for an explicit null. simple_struct.Structure
+    # reads only declared class attributes, so a library older than this one
+    # ignores the key instead of failing to parse the config.
+    trainingTopics: typing.List[InputTopic] = None
 
     def __init__(self, d, **kwargs):
         super().__init__(d, **kwargs)
         self.inputTopics = [InputTopic(it) for it in self.inputTopics]
+        self.trainingTopics = [InputTopic(it) for it in (self.trainingTopics or [])]

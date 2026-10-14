@@ -20,43 +20,93 @@ ALWAYS_PREFER_KAFKA = False # Can be used to debug kafka data source
 # the one line that says where a run's history comes from.
 _logged_import_sources = set()
 
-def provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False) -> typing.List[ray.ObjectRef[ray.data.Dataset]]:
+# The values `role` takes below: "input" selects the config's inputTopics,
+# "training" its trainingTopics (see OperatorConfig for what those are).
+_ROLES = ("input", "training")
+
+# Set by MLOperator.__evaluate for as long as its replay runs. A training topic
+# is the ground truth the replay is scored against and something a deployed
+# operator never receives, so infer() reading it through
+# provide_historic_data would score the label against itself. Driver state,
+# like the clock: infer() runs in the driver, and so does the topic selection
+# that checks this.
+_training_topics_withheld = False
+
+
+def withhold_training_topics(withheld: bool):
+    """
+    Refuse (True) or allow again (False) every read of the training topics.
+    For MLOperator.__evaluate, which reads them itself before its replay and
+    withholds them from infer() during it; not for operator code.
+    """
+    global _training_topics_withheld
+    _training_topics_withheld = withheld
+
+
+def _check_role(role):
+    # Checked before the config is parsed, so a misspelt role fails the same
+    # way with or without a CONFIG to read.
+    if role not in _ROLES:
+        raise ValueError(
+            f"unknown topic role {role!r}, expected one of "
+            f"{', '.join(repr(r) for r in _ROLES)}")
+    if role == "training" and _training_topics_withheld:
+        raise RuntimeError(
+            "training topics are withheld while the evaluation replays the test "
+            "window: they are the ground truth infer() is scored against, and a "
+            "deployed operator never receives them. Read them in train()")
+
+
+def _topics_for_role(opr_config, role):
+    return opr_config.trainingTopics if role == "training" else opr_config.inputTopics
+
+
+def provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False, role: str = "input") -> typing.List[ray.ObjectRef[ray.data.Dataset]]:
     """
     This method can be used in the train method of your model to get historic data from the input topics. It will return a list of datasets, one for each input topic. The datasets will contain data from the specified duration time. If require_full_duration is set to True, the method will wait until it can provide data for the full duration. This can lead to long waiting times if there is not enough data in the input topics. Therefore, it should only be used if strictly necessary. It is genreally recommended to train with the available data and use the need_retraining method to trigger retraining if more data is available. Expect up to 10% shorter duration than requested with require_full_duration = True.
+    role selects the topics: "input" (the default) reads the input topics, "training" reads the training topics instead, one dataset each in config order. Training topics are series the operator may learn from but never receives at runtime, such as a label; the list is empty unless the launch assigned some, and a deployed operator has none. While the evaluation replays the test window, role="training" raises RuntimeError. Any other value raises ValueError.
     """
 
-    return __provide_historic_data(duration, require_full_duration, True)
+    return __provide_historic_data(duration, require_full_duration, True, role=role)
 
 
-def provide_historic_data_local(duration: datetime.timedelta, require_full_duration: bool = False) -> typing.List[ray.data.Dataset]:
+def provide_historic_data_local(duration: datetime.timedelta, require_full_duration: bool = False, role: str = "input") -> typing.List[ray.data.Dataset]:
     """
     This method can be used in the inference method of your operator to get historic data from the input topics. It will return a list of datasets, one for each input topic. The datasets will contain data from the specified duration time. If require_full_duration is set to True, the method will wait until it can provide data for the full duration. This can lead to long waiting times if there is not enough data in the input topics. Therefore, it should only be used if strictly necessary. Expect up to 10% shorter duration than requested with require_full_duration = True.
     Compared to provide_historic_data, this method has better performance, but comes with the drawback that it will load all data into memory. Therefore, it should only be used if the amount of data is small enough to fit into memory.
+    role selects the topics exactly as in provide_historic_data: "input" (the default) or "training".
     """
 
-    return __provide_historic_data(duration, require_full_duration, False)
+    return __provide_historic_data(duration, require_full_duration, False, role=role)
 
 
-def __provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False, remote: bool = True, end: typing.Optional[datetime.datetime] = None):
+def __provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False, remote: bool = True, end: typing.Optional[datetime.datetime] = None, role: str = "input"):
     # The bound comes from the clock, the clock from the deployment config.
     # Operator code -- which train()/infer() are -- never passes an end of its
     # own; it has nothing to pass. Resolved here in the driver rather than
     # inside the readers themselves: a Ray worker does not share the driver's
     # module-level clock state, so the bound has to travel as an argument.
+    #
+    # The role is resolved here for the same reason: the readers run on Ray
+    # workers with whatever library version the cluster image carries, so they
+    # receive one topic each, exactly as before, and never learn its role.
+    _check_role(role)
     end = end if end is not None else clock.fixed()
     ds: typing.List[ray.ObjectRef[ray.data.Dataset]] = []
     dep_config = util.DeploymentConfig()
     config_json = util.load_operator_config_json(dep_config)
     opr_config = util.OperatorConfig(config_json)
-    for topic in opr_config.inputTopics:
+    for topic in _topics_for_role(opr_config, role):
         ds.append(__read_topic(opr_config.config, dep_config, topic, duration, require_full_duration, remote, end))
     return ds
 
 
-def read_input_window(start: datetime.datetime, end: datetime.datetime) -> typing.List[typing.Tuple[InputTopic, "pandas.DataFrame"]]:
+def read_input_window(start: datetime.datetime, end: datetime.datetime, role: str = "input") -> typing.List[typing.Tuple[InputTopic, "pandas.DataFrame"]]:
     """
     Read every input topic over [start, end) and return one pandas frame per
-    topic, in topic order, alongside the InputTopic it came from.
+    topic, in topic order, alongside the InputTopic it came from. With
+    role="training", the training topics instead, in their own config order:
+    the evaluation reads them for the metric alone.
 
     For the evaluation replay in MLOperator.__evaluate, not for operator code:
     provide_historic_data and provide_historic_data_local take their bound from
@@ -71,12 +121,13 @@ def read_input_window(start: datetime.datetime, end: datetime.datetime) -> typin
     stop it, so that a replay which also needs Ray for infer()'s own
     provide_historic_data calls is not torn down between reads.
     """
+    _check_role(role)
     duration = end - start
     dep_config = util.DeploymentConfig()
     config_json = util.load_operator_config_json(dep_config)
     opr_config = util.OperatorConfig(config_json)
     result = []
-    for topic in opr_config.inputTopics:
+    for topic in _topics_for_role(opr_config, role):
         dataset = __read_topic(opr_config.config, dep_config, topic, duration, False, False, end)
         result.append((topic, dataset.to_pandas()))
     return result

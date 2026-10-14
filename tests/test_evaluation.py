@@ -100,6 +100,17 @@ def _topics_and_frames():
     return [(topic1, frame1), (topic2, frame2)]
 
 
+def _window_reader(inputs, training=()):
+    """
+    A stand-in for read_input_window that answers by role, as __evaluate
+    calls it: once for the input topics and once for the training topics,
+    which none of the fixtures in this file has.
+    """
+    def read(start, end, role="input"):
+        return list(training) if role == "training" else inputs
+    return read
+
+
 def _mlflow_mock():
     m = mock.MagicMock()
     run_obj = mock.MagicMock()
@@ -157,7 +168,7 @@ class TestEvaluationMode(unittest.TestCase):
              mock.patch("operator_lib.util.op_ml.TrainMlflowLogger", _logger_mock()), \
              mock.patch(
                  "operator_lib.util.helpers.data.read_input_window",
-                 return_value=inputs,
+                 side_effect=_window_reader(inputs),
              ) as mock_read_window:
             operator.init(
                 kafka_consumer=None,
@@ -175,7 +186,14 @@ class TestEvaluationMode(unittest.TestCase):
         # The registry was never consulted: train() saw None, not the
         # sentinel pyfunc.load_model would have returned.
         self.assertEqual([None], operator.train_calls)
-        mock_read_window.assert_called_once_with(TRAINING_END, TEST_END)
+        # The input topics for the replay, then the training topics over the
+        # same window for the metric.
+        self.assertEqual(
+            [
+                mock.call(TRAINING_END, TEST_END),
+                mock.call(TRAINING_END, TEST_END, role="training"),
+            ],
+            mock_read_window.call_args_list)
 
         # infer() once per row, in time order, clock.now() at the row's time.
         self.assertEqual(5, len(operator.infer_calls))
@@ -273,7 +291,7 @@ class TestEvaluationMode(unittest.TestCase):
              mock.patch("operator_lib.util.op_ml.TrainMlflowLogger", _logger_mock()), \
              mock.patch(
                  "operator_lib.util.helpers.data.read_input_window",
-                 return_value=_topics_and_frames(),
+                 side_effect=_window_reader(_topics_and_frames()),
              ):
             operator.init(
                 kafka_consumer=None,
@@ -481,7 +499,7 @@ class TestEvaluationIsolatesODEsRun(unittest.TestCase):
         with mock.patch("operator_lib.util.op_ml.ray"), \
              mock.patch(
                  "operator_lib.util.helpers.data.read_input_window",
-                 return_value=inputs,
+                 side_effect=_window_reader(inputs),
              ):
             operator.init(
                 kafka_consumer=None,
@@ -582,7 +600,7 @@ class TestEvaluationIsolatesODEsRun(unittest.TestCase):
         with mock.patch("operator_lib.util.op_ml.ray"), \
              mock.patch(
                  "operator_lib.util.helpers.data.read_input_window",
-                 return_value=inputs,
+                 side_effect=_window_reader(inputs),
              ):
             operator.init(
                 kafka_consumer=None,
@@ -625,7 +643,7 @@ class TestEvaluationIsolatesODEsRun(unittest.TestCase):
         with mock.patch("operator_lib.util.op_ml.ray"), \
              mock.patch(
                  "operator_lib.util.helpers.data.read_input_window",
-                 return_value=inputs,
+                 side_effect=_window_reader(inputs),
              ):
             operator.init(
                 kafka_consumer=None,
@@ -671,18 +689,16 @@ def _metric_input_topic(source="device.sensor.ENERGY.Power", dest="power", name=
     })
 
 
-def _actuals_frame(topic_name, dest, rows):
+def _actuals_frame(dest, rows):
     """
-    A `merged`-shaped frame carrying the target series' own topic: one row
-    per (iso timestamp, value) pair in `rows`.
+    A frame as a reader returns it for the target series' own topic: `time`
+    and the mapping's dest column, one row per (iso timestamp, value) pair in
+    `rows`.
     """
     return pd.DataFrame({
         "time": [
             datetime.datetime.fromisoformat(t.replace("Z", "+00:00")) for t, _ in rows
         ],
-        "topic": [topic_name] * len(rows),
-        "selector": [None] * len(rows),
-        "device_id": ["device-a"] * len(rows),
         dest: [v for _, v in rows],
     })
 
@@ -701,8 +717,10 @@ def _prediction_row(result_time, result: dict):
 class TestEvaluationMetric(unittest.TestCase):
     """
     Direct tests of _compute_evaluation_metric against hand-built
-    prediction_rows/merged/inputs, the same three things __evaluate's finally
-    block already holds in memory -- no replay is run here.
+    prediction_rows and (InputTopic, frame) lists, the same things
+    __evaluate's finally block already holds in memory -- no replay is run
+    here. None of these has a training topic; tests/test_training_topics.py
+    covers those.
     """
 
     def _config(self, **overrides):
@@ -716,18 +734,17 @@ class TestEvaluationMetric(unittest.TestCase):
         return Config(values)
 
     def test_mae_matches_a_hand_computed_value(self):
-        inputs = [(_metric_input_topic(), None)]
-        merged = _actuals_frame("topic1", "power", [
+        inputs = [(_metric_input_topic(), _actuals_frame("power", [
             ("2026-06-01T00:10:00Z", 10.0),
             ("2026-06-01T00:50:00Z", 20.0),
-        ])  # bucket [00:00, 01:00) actual mean = 15.0
+        ]))]  # bucket [00:00, 01:00) actual mean = 15.0
         prediction_rows = [
             _prediction_row("2026-06-01T00:05:00Z", {"prediction": 17.0}),  # |17-15|=2
             _prediction_row("2026-06-01T00:55:00Z", {"prediction": 13.0}),  # |13-15|=2
         ]
 
         status, name, value, n = _compute_evaluation_metric(
-            self._config(evaluation_metric="mae"), prediction_rows, merged, inputs)
+            self._config(evaluation_metric="mae"), prediction_rows, inputs, [])
 
         self.assertEqual("computed", status)
         self.assertEqual("mae", name)
@@ -735,18 +752,17 @@ class TestEvaluationMetric(unittest.TestCase):
         self.assertEqual(1, n)  # both predictions fall into one bucket
 
     def test_rmse_matches_a_hand_computed_value(self):
-        inputs = [(_metric_input_topic(), None)]
-        merged = _actuals_frame("topic1", "power", [
+        inputs = [(_metric_input_topic(), _actuals_frame("power", [
             ("2026-06-01T00:10:00Z", 10.0),
             ("2026-06-01T00:50:00Z", 20.0),
-        ])  # bucket [00:00, 01:00) actual mean = 15.0
+        ]))]  # bucket [00:00, 01:00) actual mean = 15.0
         prediction_rows = [
             _prediction_row("2026-06-01T00:05:00Z", {"prediction": 17.0}),  # error 2
             _prediction_row("2026-06-01T00:55:00Z", {"prediction": 11.0}),  # error -4
         ]
 
         status, name, value, n = _compute_evaluation_metric(
-            self._config(evaluation_metric="rmse"), prediction_rows, merged, inputs)
+            self._config(evaluation_metric="rmse"), prediction_rows, inputs, [])
 
         self.assertEqual("computed", status)
         self.assertEqual("rmse", name)
@@ -759,24 +775,23 @@ class TestEvaluationMetric(unittest.TestCase):
         with error 1 in [00:00, 01:00), one with error 5 in [01:00, 02:00) --
         the shape of a replay whose message rate differs between hours.
         """
-        inputs = [(_metric_input_topic(), None)]
-        merged = _actuals_frame("topic1", "power", [
+        inputs = [(_metric_input_topic(), _actuals_frame("power", [
             ("2026-06-01T00:10:00Z", 10.0),
             ("2026-06-01T01:10:00Z", 10.0),
-        ])
+        ]))]
         prediction_rows = [
             _prediction_row("2026-06-01T00:05:00Z", {"prediction": 11.0}),
             _prediction_row("2026-06-01T00:25:00Z", {"prediction": 11.0}),
             _prediction_row("2026-06-01T00:45:00Z", {"prediction": 11.0}),
             _prediction_row("2026-06-01T01:05:00Z", {"prediction": 15.0}),
         ]
-        return inputs, merged, prediction_rows
+        return inputs, prediction_rows
 
     def test_mae_weights_every_bucket_equally_whatever_its_prediction_count(self):
-        inputs, merged, prediction_rows = self._unevenly_predicted_buckets()
+        inputs, prediction_rows = self._unevenly_predicted_buckets()
 
         status, name, value, n = _compute_evaluation_metric(
-            self._config(evaluation_metric="mae"), prediction_rows, merged, inputs)
+            self._config(evaluation_metric="mae"), prediction_rows, inputs, [])
 
         self.assertEqual("computed", status)
         # (1 + 5) / 2, not the pooled (1 + 1 + 1 + 5) / 4.
@@ -784,10 +799,10 @@ class TestEvaluationMetric(unittest.TestCase):
         self.assertEqual(2, n)
 
     def test_rmse_weights_every_bucket_equally_whatever_its_prediction_count(self):
-        inputs, merged, prediction_rows = self._unevenly_predicted_buckets()
+        inputs, prediction_rows = self._unevenly_predicted_buckets()
 
         status, name, value, n = _compute_evaluation_metric(
-            self._config(evaluation_metric="rmse"), prediction_rows, merged, inputs)
+            self._config(evaluation_metric="rmse"), prediction_rows, inputs, [])
 
         self.assertEqual("computed", status)
         # sqrt((1 + 25) / 2), not the pooled sqrt((1 + 1 + 1 + 25) / 4).
@@ -795,69 +810,65 @@ class TestEvaluationMetric(unittest.TestCase):
         self.assertEqual(2, n)
 
     def test_bucket_is_assigned_by_truncation_not_rounding(self):
-        inputs = [(_metric_input_topic(), None)]
         # Only the [00:00, 01:00) bucket has an actual; [01:00, 02:00) has
         # none. A prediction one second before the hour must still land in
         # the earlier bucket -- rounding to the nearest hour would put it in
         # the empty one instead and drop it.
-        merged = _actuals_frame("topic1", "power", [
+        inputs = [(_metric_input_topic(), _actuals_frame("power", [
             ("2026-06-01T00:01:00Z", 100.0),
-        ])
+        ]))]
         prediction_rows = [
             _prediction_row("2026-06-01T00:59:59Z", {"prediction": 110.0}),
         ]
 
         status, name, value, n = _compute_evaluation_metric(
-            self._config(evaluation_metric="mae"), prediction_rows, merged, inputs)
+            self._config(evaluation_metric="mae"), prediction_rows, inputs, [])
 
         self.assertEqual("computed", status)
         self.assertEqual(1, n)
         self.assertAlmostEqual(10.0, value)
 
     def test_a_prediction_without_a_matching_actual_is_excluded(self):
-        inputs = [(_metric_input_topic(), None)]
         # Actual data only exists for the first hour -- the usual shape at
         # the tail of the test window, where result_time runs past test_end.
-        merged = _actuals_frame("topic1", "power", [
+        inputs = [(_metric_input_topic(), _actuals_frame("power", [
             ("2026-06-01T00:10:00Z", 50.0),
-        ])
+        ]))]
         prediction_rows = [
             _prediction_row("2026-06-01T00:05:00Z", {"prediction": 55.0}),  # matches, error 5
             _prediction_row("2026-06-01T02:00:00Z", {"prediction": 999.0}),  # no actual, excluded
         ]
 
         status, name, value, n = _compute_evaluation_metric(
-            self._config(evaluation_metric="mae"), prediction_rows, merged, inputs)
+            self._config(evaluation_metric="mae"), prediction_rows, inputs, [])
 
         self.assertEqual("computed", status)
         self.assertEqual(1, n)
         self.assertAlmostEqual(5.0, value)
 
     def test_a_row_missing_the_prediction_field_is_excluded(self):
-        inputs = [(_metric_input_topic(), None)]
-        merged = _actuals_frame("topic1", "power", [
+        inputs = [(_metric_input_topic(), _actuals_frame("power", [
             ("2026-06-01T00:10:00Z", 10.0),
             ("2026-06-01T00:50:00Z", 20.0),
-        ])  # bucket mean = 15.0
+        ]))]  # bucket mean = 15.0
         prediction_rows = [
             _prediction_row("2026-06-01T00:05:00Z", {"prediction": 17.0}),  # counted
             _prediction_row("2026-06-01T00:10:00Z", {"other_field": 999.0}),  # field missing
         ]
 
         status, name, value, n = _compute_evaluation_metric(
-            self._config(evaluation_metric="mae"), prediction_rows, merged, inputs)
+            self._config(evaluation_metric="mae"), prediction_rows, inputs, [])
 
         self.assertEqual("computed", status)
         self.assertEqual(1, n)
         self.assertAlmostEqual(2.0, value)
 
     def test_an_unknown_metric_name_is_not_computed(self):
-        inputs = [(_metric_input_topic(), None)]
-        merged = _actuals_frame("topic1", "power", [("2026-06-01T00:10:00Z", 10.0)])
+        inputs = [(_metric_input_topic(), _actuals_frame("power", [("2026-06-01T00:10:00Z", 10.0)]))]
         prediction_rows = [_prediction_row("2026-06-01T00:05:00Z", {"prediction": 1.0})]
 
         status, name, value, n = _compute_evaluation_metric(
-            self._config(evaluation_metric="mape"), prediction_rows, merged, inputs)
+            self._config(evaluation_metric="mape"), prediction_rows, inputs, [])
 
         self.assertEqual("unknown metric 'mape'", status)
         self.assertIsNone(name)
@@ -865,13 +876,12 @@ class TestEvaluationMetric(unittest.TestCase):
         self.assertIsNone(n)
 
     def test_an_unresolvable_target_series_is_not_computed(self):
-        inputs = [(_metric_input_topic(), None)]
-        merged = _actuals_frame("topic1", "power", [("2026-06-01T00:10:00Z", 10.0)])
+        inputs = [(_metric_input_topic(), _actuals_frame("power", [("2026-06-01T00:10:00Z", 10.0)]))]
         prediction_rows = [_prediction_row("2026-06-01T00:05:00Z", {"prediction": 1.0})]
 
         status, name, value, n = _compute_evaluation_metric(
             self._config(evaluation_target_series="sensor.DOES.NOT.EXIST"),
-            prediction_rows, merged, inputs)
+            prediction_rows, inputs, [])
 
         self.assertEqual(
             "target series 'sensor.DOES.NOT.EXIST' matches no input topic", status)
@@ -883,14 +893,15 @@ class TestEvaluationMetric(unittest.TestCase):
         # Two different topics whose mapping sources both resolve, after
         # dropping the first path element, to the same platform path.
         inputs = [
-            (_metric_input_topic(source="device-a.sensor.ENERGY.Power", dest="power", name="topic1"), None),
-            (_metric_input_topic(source="device-b.sensor.ENERGY.Power", dest="p2", name="topic2"), None),
+            (_metric_input_topic(source="device-a.sensor.ENERGY.Power", dest="power", name="topic1"),
+             _actuals_frame("power", [("2026-06-01T00:10:00Z", 10.0)])),
+            (_metric_input_topic(source="device-b.sensor.ENERGY.Power", dest="p2", name="topic2"),
+             _actuals_frame("p2", [("2026-06-01T00:10:00Z", 10.0)])),
         ]
-        merged = _actuals_frame("topic1", "power", [("2026-06-01T00:10:00Z", 10.0)])
         prediction_rows = [_prediction_row("2026-06-01T00:05:00Z", {"prediction": 1.0})]
 
         status, name, value, n = _compute_evaluation_metric(
-            self._config(), prediction_rows, merged, inputs)
+            self._config(), prediction_rows, inputs, [])
 
         self.assertEqual(
             "target series 'sensor.ENERGY.Power' matches 2 mappings, expected exactly one",
@@ -900,14 +911,13 @@ class TestEvaluationMetric(unittest.TestCase):
         self.assertIsNone(n)
 
     def test_metric_n_of_zero_is_not_computed(self):
-        inputs = [(_metric_input_topic(), None)]
         # Actual data exists, but in a bucket the one prediction never falls
         # into, so nothing is ever paired.
-        merged = _actuals_frame("topic1", "power", [("2026-06-01T05:00:00Z", 10.0)])
+        inputs = [(_metric_input_topic(), _actuals_frame("power", [("2026-06-01T05:00:00Z", 10.0)]))]
         prediction_rows = [_prediction_row("2026-06-01T00:05:00Z", {"prediction": 1.0})]
 
         status, name, value, n = _compute_evaluation_metric(
-            self._config(), prediction_rows, merged, inputs)
+            self._config(), prediction_rows, inputs, [])
 
         self.assertEqual("no prediction has a matching actual value", status)
         self.assertIsNone(name)
@@ -915,11 +925,10 @@ class TestEvaluationMetric(unittest.TestCase):
         self.assertIsNone(n)
 
     def test_missing_config_names_every_unset_key(self):
-        inputs = [(_metric_input_topic(), None)]
-        merged = _actuals_frame("topic1", "power", [("2026-06-01T00:10:00Z", 10.0)])
+        inputs = [(_metric_input_topic(), _actuals_frame("power", [("2026-06-01T00:10:00Z", 10.0)]))]
 
         status, name, value, n = _compute_evaluation_metric(
-            Config({}), [], merged, inputs)
+            Config({}), [], inputs, [])
 
         self.assertEqual(
             "evaluation_metric, evaluation_target_series, "
