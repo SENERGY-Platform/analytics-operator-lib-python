@@ -18,6 +18,7 @@ import os
 
 from .baggage import *
 from .config import *
+from .declaration import *
 from .logger import *
 from .model import *
 from .op_base import *

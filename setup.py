@@ -55,7 +55,7 @@ setuptools.setup(
         'structlog @ git+https://github.com/SENERGY-Platform/python-structlog.git@0.3.0'
     ],
     packages=setuptools.find_packages(),
-    python_requires='>=3.5.3',
+    python_requires='>=3.10',
     classifiers=(
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',

@@ -17,6 +17,7 @@
 __all__ = ("OperatorConfig", "Config", "Selector")
 
 import simple_struct
+import types
 import typing
 import os
 
@@ -79,6 +80,10 @@ class Config(simple_struct.Structure):
     # without an entry is read from Kafka, as before; see
     # operator_lib.util.helpers.exports.
     import_exports = None
+    # Names a subclass declares itself, recorded before __init_subclass__ copies the
+    # inherited ones in. The manifest generator reads them to tell the operator's
+    # config fields from the library's.
+    _own_fields = ()
 
     def __init__(self, d, **kwargs):
         super().__init__(d, **kwargs)
@@ -92,6 +97,11 @@ class Config(simple_struct.Structure):
     # class wins, so a subclass can still override a default.
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+        cls._own_fields = tuple(
+            name for name, value in vars(cls).items()
+            if not name.startswith("_")
+            and not isinstance(value, (types.FunctionType, staticmethod, classmethod, property))
+        )
         for base in cls.__mro__[1:]:
             if not issubclass(base, Config):
                 continue

@@ -18,6 +18,7 @@ __all__ = ("OperatorBase",)
 
 from .logger import logger
 from .model import Config, Selector
+from .declaration import Outputs, is_declaration
 from . import clock
 import confluent_kafka
 import mf_lib
@@ -50,6 +51,10 @@ class OperatorBase:
     configType = Config # Subclasses may override this with a subclass of Config.
     config = configType({})
     selectors: typing.List[Selector] = [] # Subclasses should fill these.
+    # Optional declarations: subclasses of Inputs and Outputs. They feed the manifest
+    # generator; at runtime only the output names are checked, by a warning.
+    inputs: typing.Optional[typing.Type] = None
+    outputs: typing.Optional[typing.Type[Outputs]] = None
 
     def __new__(cls, *args, **kwargs):
         obj = super(OperatorBase, cls).__new__(cls)
@@ -62,7 +67,18 @@ class OperatorBase:
         setattr(obj, f"_{OperatorBase.__name__}__poll_timeout", None)
         setattr(obj, f"_{OperatorBase.__name__}__stop", False)
         setattr(obj, f"_{OperatorBase.__name__}__stopped", False)
+        setattr(obj, f"_{OperatorBase.__name__}__undeclared_outputs", set())
         return obj
+
+    def __warn_undeclared_outputs(self, result):
+        # An instance attribute named `outputs` that is not an Outputs class is the operator's own.
+        if not is_declaration(self.outputs, Outputs) or not isinstance(result, dict):
+            return
+        declared = self.outputs.names()
+        for key in result:
+            if key not in declared and key not in self.__undeclared_outputs:
+                self.__undeclared_outputs.add(key)
+                logger.warning(f"operator returned output '{key}' that {self.outputs.__name__} does not declare")
 
     def __call_run(self, message, device_id, timestamp: datetime.datetime) -> typing.Tuple[typing.List[typing.Optional[datetime.datetime]], typing.List[typing.Any]]:
         run_results = list()
@@ -85,6 +101,8 @@ class OperatorBase:
                             dt_result = None
                             run_result = ret
                         if run_result is not None:
+                            for single in (run_result if isinstance(run_result, list) else [run_result]):
+                                self.__warn_undeclared_outputs(single)
                             # one timestamp per result, which __route pairs them by
                             if isinstance(run_result, list):
                                 run_results += run_result
