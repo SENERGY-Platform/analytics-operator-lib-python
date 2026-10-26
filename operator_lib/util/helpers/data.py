@@ -1,3 +1,4 @@
+import copy
 import datetime
 import ray
 import typing
@@ -145,6 +146,14 @@ def __read_topic(config, dep_config, topic, duration, require_full_duration, rem
     Kafka topic keeps days where the export keeps everything. Without an entry
     it is read from Kafka, as it always was.
     """
+    if topic.filterType == "DeviceId":
+        devices = _split_devices(topic.filterValue)
+        if len(devices) > 1:
+            return __read_devices(config, dep_config, topic, devices, duration, require_full_duration, remote, end)
+        if len(devices) == 1 and devices[0] != topic.filterValue:
+            # "a, " or " a": one device, written the way the flow engine joined it.
+            topic = _topic_for_device(topic, devices[0])
+
     if topic.filterType == "ImportId":
         entry = None
         if ALWAYS_PREFER_KAFKA:
@@ -169,6 +178,61 @@ def __read_topic(config, dep_config, topic, duration, require_full_duration, rem
         f = get_kafka_dataset_remote.remote
     return f(dep_config.config_bootstrap_servers,
         topic, dep_config.pipeline_id, duration, require_full_duration, end)
+
+
+def _split_devices(filter_value):
+    """
+    The devices of a DeviceId topic. The flow engine joins the several devices of
+    one cloud-operator input with commas into filterValue; the live path splits
+    them in create_filter_handler, and so does the history here. Empty entries
+    are dropped and repeated devices read once, in first-seen order.
+    """
+    devices = []
+    for entry in (filter_value or "").split(","):
+        entry = entry.strip()
+        if entry and entry not in devices:
+            devices.append(entry)
+    return devices
+
+
+def _topic_for_device(topic, device):
+    single = copy.deepcopy(topic)
+    single.filterValue = device
+    return single
+
+
+def _with_device_column(batch, device):
+    batch["device_id"] = device
+    return batch
+
+
+def _union_device_datasets_impl(devices, *datasets):
+    tagged = [d.map_batches(_with_device_column, batch_format="pandas", fn_kwargs={"device": device})
+              for device, d in zip(devices, datasets)]
+    return tagged[0].union(*tagged[1:])
+
+
+@ray.remote
+def _union_device_datasets_remote(devices, *datasets) -> ray.data.Dataset:
+    # Top-level ObjectRef arguments arrive resolved, so these are the datasets
+    # the per-device readers returned.
+    return _union_device_datasets_impl(devices, *datasets)
+
+
+def __read_devices(config, dep_config, topic, devices, duration, require_full_duration, remote, end):
+    """
+    Read a DeviceId topic with several devices as one dataset: each device goes
+    through the ordinary dispatch as a topic of its own, and the rows of all of
+    them come back together with a column device_id. A topic with one device
+    never gets here and has no such column. duration, require_full_duration and
+    end apply to every device alike.
+    """
+    parts = [__read_topic(config, dep_config, _topic_for_device(topic, device),
+                          duration, require_full_duration, remote, end)
+             for device in devices]
+    if remote:
+        return _union_device_datasets_remote.remote(devices, *parts)
+    return _union_device_datasets_impl(devices, *parts)
 
 
 def _log_import_source_once(topic, reason):

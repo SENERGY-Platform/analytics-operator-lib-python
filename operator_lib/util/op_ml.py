@@ -298,7 +298,9 @@ class MLOperator(OperatorBase):
                 device_id = topic.filterValue if topic.filterType == "DeviceId" else None
                 frame["topic"] = topic.name
                 frame["selector"] = selector
-                frame["device_id"] = device_id
+                # A DeviceId topic with several devices arrives with its own device_id column.
+                if "device_id" not in frame.columns:
+                    frame["device_id"] = device_id
                 # Topic names are taken as unique among one operator's input
                 # topics, the same assumption __provide_historic_data's own
                 # topic loop already makes.
