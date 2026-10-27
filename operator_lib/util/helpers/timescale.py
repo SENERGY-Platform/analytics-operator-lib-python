@@ -7,6 +7,7 @@ from operator_lib.util.model import InputTopic
 from operator_lib.util.helpers.exports import ImportExport, export_column_pairs
 import base64
 import time
+from operator_lib.util.logger import logger
 
 @ray.remote
 def get_timescale_dataset_remote(conn_str: str, conf: InputTopic, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> ray.data.Dataset:
@@ -49,17 +50,25 @@ def __timestamptz_literal(dt: datetime.datetime) -> str:
     return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f+00:00")
 
 
-def __get_timescale_dataset_query(conn_str: str, conf: InputTopic, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> str:
+def __select_parts(conf: InputTopic, duration: datetime.timedelta, end: typing.Optional[datetime.datetime]) -> typing.Tuple[str, typing.List[typing.Tuple[str, str]], str]:
+    """
+    The pieces every timescale query of a topic is built from: the quoted table
+    name, the (quoted source column, quoted dest alias) pairs, and the window
+    clause. Shared by the dataset reader and the SQL reader, so both name the
+    same table, quote the same way and cut the first path element alike.
+    """
     table_name = __quote_identifier(__get_table_name(
         conf.filterValue, conf.name.replace("_", ":")))
     columns = []
-
     for mapping in conf.mappings:
         source_path = ".".join(mapping.source.split(".")[1:]) # remove the first path element
-        columns.append(
-            f"{__quote_identifier(source_path)} AS {__quote_identifier(mapping.dest)}")
+        columns.append((__quote_identifier(source_path), __quote_identifier(mapping.dest)))
+    return table_name, columns, __window_clause(duration, end)
 
-    where = __window_clause(duration, end)
+
+def __get_timescale_dataset_query(conn_str: str, conf: InputTopic, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> str:
+    table_name, column_pairs, where = __select_parts(conf, duration, end)
+    columns = [f"{source} AS {dest}" for source, dest in column_pairs]
 
     query = f"""
         SELECT
@@ -73,6 +82,80 @@ def __get_timescale_dataset_query(conn_str: str, conf: InputTopic, duration: dat
     """
     __guard_full_duration(conn_str, conf, query, duration, require_full_duration, end)
     return query
+
+
+def __get_sql_reader_query(conf: InputTopic, duration: datetime.timedelta, end: typing.Optional[datetime.datetime], changes_only: bool) -> str:
+    """
+    The query of the SQL reader: the plain window read, or with changes_only
+    only the rows whose value differs from the previous or the next row in at
+    least one mapped column.
+
+    The first and the last row of the window always stay: they are found by the
+    missing neighbour (lag/lead of time, which is never NULL), not by comparing
+    values, so a NULL value in the first row does not make it disappear.
+    The comparison is IS DISTINCT FROM, NULL-safe: NULL against NULL is equal.
+
+    The rows are ordered by time and then by the mapped columns. Without the
+    second key, rows sharing a timestamp come in any order, and the same query
+    could return a different number of rows each time: in a burst of
+    on, on, off the kept rows depend on where the off falls. Every maximal run
+    of equal rows keeps its first and its last row whatever the order, so no
+    distinct value of a burst is lost either way, but the result is only
+    reproducible with a total order. Equal rows are indistinguishable, so
+    ordering by the columns is total for everything that can be told apart.
+    """
+    table_name, column_pairs, where = __select_parts(conf, duration, end)
+    if not changes_only:
+        columns = [f"{source} AS {dest}" for source, dest in column_pairs]
+        return f"""
+        SELECT
+            time,
+            {", ".join(columns)}
+        FROM
+            {table_name}
+        WHERE
+            {where}
+        ORDER BY time ASC
+    """
+    dests = [dest for _, dest in column_pairs]
+    base_columns = [f"{source} AS {dest}" for source, dest in column_pairs]
+    order = ", ".join(["time"] + dests)
+    neighbours = ["lag(time) OVER w AS __prev_time", "lead(time) OVER w AS __next_time"]
+    differs = []
+    for i, dest in enumerate(dests):
+        neighbours.append(f"lag({dest}) OVER w AS __prev_{i}")
+        neighbours.append(f"lead({dest}) OVER w AS __next_{i}")
+        differs.append(f"{dest} IS DISTINCT FROM __prev_{i}")
+        differs.append(f"{dest} IS DISTINCT FROM __next_{i}")
+    return f"""
+        WITH base AS (
+            SELECT
+                time,
+                {", ".join(base_columns)}
+            FROM
+                {table_name}
+            WHERE
+                {where}
+        ), neighbours AS (
+            SELECT
+                time,
+                {", ".join(dests)},
+                {", ".join(neighbours)}
+            FROM
+                base
+            WINDOW w AS (ORDER BY {order})
+        )
+        SELECT
+            time,
+            {", ".join(dests)}
+        FROM
+            neighbours
+        WHERE
+            __prev_time IS NULL
+            OR __next_time IS NULL
+            OR {" OR ".join(differs)}
+        ORDER BY {order}
+    """
 
 
 def __window_clause(duration: datetime.timedelta, end: typing.Optional[datetime.datetime]) -> str:
@@ -196,3 +279,125 @@ def __get_table_name(device_id: str, service_id: str) -> str:
 
 def __create_timescale_connection(conn_str: str) -> Psycopg2Connection:
     return psycopg2.connect(conn_str)
+
+
+
+# Reading with the SQL reader: one task, one connection, one query per device
+# table. A dropped connection (a DNS hiccup, a restarted database) costs one
+# table another try, not the whole read.
+SQL_READ_ATTEMPTS = 3
+SQL_RETRY_PAUSE_S = 5
+
+SqlInputJob = typing.List[typing.Tuple[typing.Optional[str], InputTopic]]
+"""One input: its (device or None, topic of that single device) entries in order.
+The device is set, and becomes the column device_id, only for an input that names several."""
+
+
+def __redact(text: str, conn_str: str) -> str:
+    # The DSN, and its password on its own, never leave in a message: a
+    # connection error may quote what it was given.
+    redacted = str(text).replace(conn_str, "***")
+    try:
+        password = psycopg2.extensions.parse_dsn(conn_str).get("password")
+    except Exception:
+        password = None
+    if password:
+        redacted = redacted.replace(password, "***")
+    return redacted
+
+
+def __query_to_frame(connection, query: str):
+    import pandas as pd
+    cursor = connection.cursor()
+    try:
+        cursor.execute(query)
+        names = [d[0] for d in cursor.description]
+        frame = pd.DataFrame.from_records(cursor.fetchall(), columns=names, coerce_float=True)
+    finally:
+        cursor.close()
+    # Ray+PyArrow cannot infer timezone-aware pandas dtypes, see get_timescale_dataset_local.
+    frame["time"] = pd.to_datetime(frame["time"], utc=True).dt.tz_localize(None)
+    for col in frame.columns:
+        if isinstance(frame[col].dtype, pd.DatetimeTZDtype):
+            frame[col] = frame[col].dt.tz_convert("UTC").dt.tz_localize(None)
+    return frame
+
+
+def __read_table(state: dict, conn_str: str, connect, query: str, label: str):
+    """
+    One table over the connection held in state, reconnecting on
+    psycopg2.OperationalError: SQL_READ_ATTEMPTS tries, SQL_RETRY_PAUSE_S
+    between them. Any other error, and the last OperationalError, is raised
+    with the DSN removed from its message.
+    """
+    for attempt in range(1, SQL_READ_ATTEMPTS + 1):
+        failure = None
+        try:
+            if state.get("connection") is None:
+                state["connection"] = connect(conn_str)
+                try:
+                    state["connection"].autocommit = True
+                except Exception:
+                    pass
+            return __query_to_frame(state["connection"], query)
+        except psycopg2.OperationalError as e:
+            failure = f"{type(e).__name__}: {__redact(e, conn_str)}"
+        except Exception as e:
+            if __redact(e, conn_str) == str(e):
+                raise
+            failure = f"{type(e).__name__}: {__redact(e, conn_str)}"
+            attempt = None
+        # Outside the except block: raised from here, the new exception carries
+        # no __context__ that still holds the original message.
+        if attempt is None:
+            raise RuntimeError(f"reading {label} failed: {failure}")
+        try:
+            if state.get("connection") is not None:
+                state["connection"].close()
+        except Exception:
+            pass
+        state["connection"] = None
+        if attempt == SQL_READ_ATTEMPTS:
+            raise psycopg2.OperationalError(f"reading {label} failed after {attempt} attempts: {failure}")
+        logger.warning(f"reading {label}: attempt {attempt} of {SQL_READ_ATTEMPTS} failed "
+                       f"({failure}), reconnecting in {SQL_RETRY_PAUSE_S}s")
+        time.sleep(SQL_RETRY_PAUSE_S)
+
+
+def __sql_input_datasets(conn_str: str, jobs: typing.List[SqlInputJob], duration: datetime.timedelta, end: datetime.datetime, changes_only: bool, connect):
+    """
+    Yield one dataset per job, in order, reading one table after the other over
+    one connection. A generator, so that a caller which wants the inputs one by
+    one (the remote task, whose returns are separate object refs) gets each as
+    soon as it is read and a failure only takes the inputs from the failing one on.
+    """
+    import pandas as pd
+    state = {"connection": None}
+    try:
+        for job in jobs:
+            frames = []
+            for device, topic in job:
+                query = __get_sql_reader_query(topic, duration, end, changes_only)
+                frame = __read_table(state, conn_str, connect, query,
+                                     f"{topic.name} ({topic.filterValue})")
+                if device is not None:
+                    frame["device_id"] = device
+                frames.append(frame)
+            yield ray.data.from_pandas(frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True))
+    finally:
+        if state.get("connection") is not None:
+            try:
+                state["connection"].close()
+            except Exception:
+                pass
+
+
+def get_timescale_sql_datasets_local(conn_str: str, jobs: typing.List[SqlInputJob], duration: datetime.timedelta, end: datetime.datetime, changes_only: bool = False, connect=None) -> typing.List[ray.data.Dataset]:
+    return list(__sql_input_datasets(conn_str, jobs, duration, end, changes_only, connect or __create_timescale_connection))
+
+
+@ray.remote
+def get_timescale_sql_datasets_remote(conn_str: str, jobs: typing.List[SqlInputJob], duration: datetime.timedelta, end: datetime.datetime, changes_only: bool = False, connect=None):
+    # A generator: called with num_returns = len(jobs), every yield becomes the
+    # object ref of one input, also for a single input (then .remote returns one ref).
+    yield from __sql_input_datasets(conn_str, jobs, duration, end, changes_only, connect or __create_timescale_connection)

@@ -51,3 +51,13 @@ The CI of an operator repository commits the manifest before tagging a version, 
 ## History of inputs with several devices
 
 An input assigned several devices (comma-separated in its `filterValue`) is still one dataset in `provide_historic_data`, `provide_historic_data_local` and `read_input_window`: the rows of every device, with an added column `device_id` naming the device. An input with one device has no such column.
+
+## Reading history with `reader="sql"`
+
+`provide_historic_data(..., reader="dataset")` is the default: one lazy Ray dataset per device. With `reader="sql"` every input that is read from Timescale over a database connection (a device input named `urn_infai_ses_service_*`, with `TS_CONN` or `ts_conn` set) is read in one Ray task over one connection, one query per device table. This is much faster for many small inputs, where the default spends its time on scheduling. The return value keeps its shape: a list in config order, one dataset or `ObjectRef` per input, with `device_id` for an input with several devices. Other inputs are read as before. `provide_historic_data_local` takes the same parameters and runs the queries in the calling process.
+
+A table that fails with a connection error is read again on a new connection, 3 attempts 5 s apart. If it still fails, that input and the ones after it in config order raise when read; the ones before it are unaffected.
+
+`changes_only=True` (only with `reader="sql"`) keeps, per table, the rows whose value differs from the previous or the next row in at least one mapped column. Periodic repeats of an unchanged value drop out, the first and the last row of the window stay, and so does every distinct value of rows that share a timestamp. The rows are ordered by time and then by the mapped columns.
+
+`reader="sql"` with `require_full_duration=True` raises `ValueError`: waiting inside the single task would block every other input.
