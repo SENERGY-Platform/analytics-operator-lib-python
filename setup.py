@@ -47,7 +47,7 @@ setuptools.setup(
         'concurrency-watchdog @ git+https://github.com/SENERGY-Platform/concurrency-watchdog.git@0.1.1',
         'confluent_kafka==2.4.0',
         'prometheus-client<1',
-        'mlflow==3.8.1',
+        'mlflow-skinny==3.8.1',
         'ray[data]==2.55.0',
         'ray[client]==2.55.0',
         'psycopg2-binary==2.9.11',

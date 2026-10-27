@@ -5,10 +5,12 @@ Library for SENERGY analytics operators written in Python. An operator subclasse
 Install a tagged version:
 
 ```toml
-"operator-lib @ git+https://github.com/SENERGY-Platform/analytics-operator-lib-python@v1.10.1"
+"operator-lib @ git+https://github.com/SENERGY-Platform/analytics-operator-lib-python@v1.11.0"
 ```
 
 Requires Python 3.10 or later.
+
+MLflow comes as `mlflow-skinny`, the client: tracking, the model registry and pyfunc models. An environment that also runs the MLflow server or UI, or tracks into a local SQL database, installs `mlflow` itself.
 
 ## Declaring inputs, outputs and configuration
 
