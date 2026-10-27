@@ -6,7 +6,7 @@ import operator_lib.util as util
 from operator_lib.util import clock
 from operator_lib.util.model import InputTopic
 from operator_lib.util.helpers.timescale import get_timescale_dataset_local, get_timescale_dataset_remote
-from operator_lib.util.helpers.timescale import get_timescale_sql_datasets_local, get_timescale_sql_datasets_remote
+from operator_lib.util.helpers.timescale import get_timescale_sql_datasets_local, get_timescale_sql_datasets_remote, SqlOverride
 from operator_lib.util.helpers.timescale import get_export_dataset_local, get_export_dataset_remote
 from operator_lib.util.helpers.kafka import get_kafka_dataset_local, get_kafka_dataset_remote
 from operator_lib.util.helpers.ts_wrapper import get_ts_wrapper_dataset_local, get_ts_wrapper_dataset_remote
@@ -66,7 +66,7 @@ def _topics_for_role(opr_config, role):
 _READERS = ("dataset", "sql")
 
 
-def _check_reader(reader, changes_only, require_full_duration):
+def _check_reader(reader, changes_only, require_full_duration, overrides=None):
     # Checked before the config is parsed, like the role.
     if reader not in _READERS:
         raise ValueError(
@@ -78,31 +78,41 @@ def _check_reader(reader, changes_only, require_full_duration):
         raise ValueError(
             "require_full_duration=True is not supported with reader=\"sql\": waiting "
             "for one input inside the single reading task would block every other input")
+    if overrides is not None:
+        if reader != "sql":
+            raise ValueError("overrides need reader=\"sql\"")
+        if not isinstance(overrides, typing.Mapping):
+            raise ValueError("overrides must be a mapping of input name to SqlOverride")
+        for key, value in overrides.items():
+            if not isinstance(key, str) or not isinstance(value, SqlOverride):
+                raise ValueError(
+                    f"overrides must map the name of an input to a SqlOverride, got {key!r}: {value!r}")
 
 
-def provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False, role: str = "input", reader: str = "dataset", changes_only: bool = False) -> typing.List[ray.ObjectRef[ray.data.Dataset]]:
+def provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False, role: str = "input", reader: str = "dataset", changes_only: bool = False, overrides: typing.Optional[typing.Mapping[str, SqlOverride]] = None) -> typing.List[ray.ObjectRef[ray.data.Dataset]]:
     """
     This method can be used in the train method of your model to get historic data from the input topics. It will return a list of datasets, one for each input topic. The datasets will contain data from the specified duration time. If require_full_duration is set to True, the method will wait until it can provide data for the full duration. This can lead to long waiting times if there is not enough data in the input topics. Therefore, it should only be used if strictly necessary. It is genreally recommended to train with the available data and use the need_retraining method to trigger retraining if more data is available. Expect up to 10% shorter duration than requested with require_full_duration = True.
     role selects the topics: "input" (the default) reads the input topics, "training" reads the training topics instead, one dataset each in config order. Training topics are series the operator may learn from but never receives at runtime, such as a label; the list is empty unless the launch assigned some, and a deployed operator has none. While the evaluation replays the test window, role="training" raises RuntimeError. Any other value raises ValueError.
     reader selects how inputs read from Timescale over a database connection (a DeviceId input named urn_infai_ses_service_*, with TS_CONN or 'ts_conn' set) are read: "dataset" (the default) as before, one lazy dataset per device; "sql" in a single Ray task over a single connection, one query per device, which is much faster for many small inputs. The return value has the same shape either way. Other inputs are read as before. reader="sql" with require_full_duration=True raises ValueError, and so does an unknown reader. A table that fails with a connection error is retried (3 attempts, 5 s apart); if it still fails, that input and the ones after it in config order fail when read, the ones before it are unaffected.
     changes_only=True (reader="sql" only, else ValueError) keeps per table just the rows whose value differs from the previous or the next row in at least one mapped column, ordered by time and then by the mapped columns. The first and the last row of the window stay, and so does every distinct value of rows that share a timestamp.
+    overrides (reader="sql" only, else ValueError) maps the name of an operator input (mapping.dest) to a SqlOverride(duration=..., bucket=...). duration replaces the window of that input. bucket reads it as one row per time bucket, the bucket start as time and the maximum of the value in it (numeric columns only, whole seconds); changes_only then compares the bucket rows. A topic whose mappings differ in their override is read with one query per group and the rows are put one under the other, sorted by time, with NaN in the columns of the other groups. A name that is no input raises ValueError.
     """
 
-    return __provide_historic_data(duration, require_full_duration, True, role=role, reader=reader, changes_only=changes_only)
+    return __provide_historic_data(duration, require_full_duration, True, role=role, reader=reader, changes_only=changes_only, overrides=overrides)
 
 
-def provide_historic_data_local(duration: datetime.timedelta, require_full_duration: bool = False, role: str = "input", reader: str = "dataset", changes_only: bool = False) -> typing.List[ray.data.Dataset]:
+def provide_historic_data_local(duration: datetime.timedelta, require_full_duration: bool = False, role: str = "input", reader: str = "dataset", changes_only: bool = False, overrides: typing.Optional[typing.Mapping[str, SqlOverride]] = None) -> typing.List[ray.data.Dataset]:
     """
     This method can be used in the inference method of your operator to get historic data from the input topics. It will return a list of datasets, one for each input topic. The datasets will contain data from the specified duration time. If require_full_duration is set to True, the method will wait until it can provide data for the full duration. This can lead to long waiting times if there is not enough data in the input topics. Therefore, it should only be used if strictly necessary. Expect up to 10% shorter duration than requested with require_full_duration = True.
     Compared to provide_historic_data, this method has better performance, but comes with the drawback that it will load all data into memory. Therefore, it should only be used if the amount of data is small enough to fit into memory.
     role selects the topics exactly as in provide_historic_data: "input" (the default) or "training".
-    reader and changes_only as in provide_historic_data; with reader="sql" the query runs in the calling process.
+    reader, changes_only and overrides as in provide_historic_data; with reader="sql" the query runs in the calling process.
     """
 
-    return __provide_historic_data(duration, require_full_duration, False, role=role, reader=reader, changes_only=changes_only)
+    return __provide_historic_data(duration, require_full_duration, False, role=role, reader=reader, changes_only=changes_only, overrides=overrides)
 
 
-def __provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False, remote: bool = True, end: typing.Optional[datetime.datetime] = None, role: str = "input", reader: str = "dataset", changes_only: bool = False):
+def __provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False, remote: bool = True, end: typing.Optional[datetime.datetime] = None, role: str = "input", reader: str = "dataset", changes_only: bool = False, overrides: typing.Optional[typing.Mapping[str, SqlOverride]] = None):
     # The bound comes from the clock, the clock from the deployment config.
     # Operator code -- which train()/infer() are -- never passes an end of its
     # own; it has nothing to pass. Resolved here in the driver rather than
@@ -113,7 +123,7 @@ def __provide_historic_data(duration: datetime.timedelta, require_full_duration:
     # workers with whatever library version the cluster image carries, so they
     # receive one topic each, exactly as before, and never learn its role.
     _check_role(role)
-    _check_reader(reader, changes_only, require_full_duration)
+    _check_reader(reader, changes_only, require_full_duration, overrides)
     end = end if end is not None else clock.fixed()
     ds: typing.List[ray.ObjectRef[ray.data.Dataset]] = []
     dep_config = util.DeploymentConfig()
@@ -121,42 +131,61 @@ def __provide_historic_data(duration: datetime.timedelta, require_full_duration:
     opr_config = util.OperatorConfig(config_json)
     topics = _topics_for_role(opr_config, role)
     if reader == "sql":
-        return __read_topics_sql(opr_config.config, dep_config, topics, duration, remote, end, changes_only)
+        return __read_topics_sql(opr_config.config, dep_config, topics, duration, remote, end, changes_only, overrides)
     for topic in topics:
         ds.append(__read_topic(opr_config.config, dep_config, topic, duration, require_full_duration, remote, end))
     return ds
 
 
-def _sql_job(topic):
+def _sql_job(topic, overrides=None):
     """
     The entries of one input for the SQL reader, [(device or None, topic of that
     one device)], or None if the input is not read from Timescale by DSN. The
     device is only set for an input that names several, where it becomes the
-    column device_id, exactly as in __read_devices.
+    column device_id, exactly as in __read_devices. With overrides, an entry carries
+    {dest: SqlOverride} of the mappings of its topic that have one, as a third element.
     """
     if topic.filterType != "DeviceId" or not topic.name.startswith("urn_infai_ses_service"):
         return None
     devices = _split_devices(topic.filterValue)
     if not devices:
         return None
+    own = {m.dest: overrides[m.dest] for m in topic.mappings if overrides and m.dest in overrides}
+    extra = (own,) if own else ()
     if len(devices) == 1:
-        return [(None, _topic_for_device(topic, devices[0]))]
-    return [(device, _topic_for_device(topic, device)) for device in devices]
+        return [(None, _topic_for_device(topic, devices[0])) + extra]
+    return [(device, _topic_for_device(topic, device)) + extra for device in devices]
 
 
-def __read_topics_sql(config, dep_config, topics, duration, remote, end, changes_only):
+def __read_topics_sql(config, dep_config, topics, duration, remote, end, changes_only, overrides=None):
     """
     reader="sql": every input that would be read from Timescale over the DSN is
     read by one task over one connection; the rest goes through __read_topic as
     always. The result is in config order either way.
+
+    An override key that names no mapping of the topics raises ValueError: a
+    misspelt name would otherwise leave the full, unbucketed history in place
+    without a word. An override for an input that is not read over the DSN
+    cannot apply and is logged.
     """
+    if overrides:
+        known = {m.dest for topic in topics for m in topic.mappings}
+        unknown = sorted(set(overrides) - known)
+        if unknown:
+            raise ValueError(
+                f"overrides name no input: {', '.join(repr(k) for k in unknown)}; "
+                f"the inputs are {', '.join(repr(k) for k in sorted(known))}")
     ts_conn = None if ALWAYS_PREFER_KAFKA else _resolve_ts_conn(config, dep_config)
     jobs = {}
     if ts_conn:
         for i, topic in enumerate(topics):
-            job = _sql_job(topic)
+            job = _sql_job(topic, overrides)
             if job is not None:
                 jobs[i] = job
+    if overrides:
+        in_sql = {m.dest for i in jobs for m in topics[i].mappings}
+        for key in sorted(set(overrides) - in_sql):
+            logger.warning(f"override for input {key!r} is ignored: it is not read from Timescale over a database connection")
     sql_results = []
     if jobs:
         job_list = list(jobs.values())

@@ -1,6 +1,8 @@
 import psycopg2
 from psycopg2.extensions import connection as Psycopg2Connection
 import ray
+import copy
+import dataclasses
 import datetime
 import typing
 from operator_lib.util.model import InputTopic
@@ -84,7 +86,7 @@ def __get_timescale_dataset_query(conn_str: str, conf: InputTopic, duration: dat
     return query
 
 
-def __get_sql_reader_query(conf: InputTopic, duration: datetime.timedelta, end: typing.Optional[datetime.datetime], changes_only: bool) -> str:
+def __get_sql_reader_query(conf: InputTopic, duration: datetime.timedelta, end: typing.Optional[datetime.datetime], changes_only: bool, bucket: typing.Optional[datetime.timedelta] = None) -> str:
     """
     The query of the SQL reader: the plain window read, or with changes_only
     only the rows whose value differs from the previous or the next row in at
@@ -103,8 +105,33 @@ def __get_sql_reader_query(conf: InputTopic, duration: datetime.timedelta, end: 
     distinct value of a burst is lost either way, but the result is only
     reproducible with a total order. Equal rows are indistinguishable, so
     ordering by the columns is total for everything that can be told apart.
+
+    With bucket the table is first reduced to one row per time bucket,
+    time_bucket(<bucket>, time) AS time and max(<column>) AS <dest>, grouped by
+    the bucket (TimescaleDB's time_bucket; the columns must be numeric, max has
+    no boolean). That reduction is the CTE base, and changes_only then compares
+    the bucket rows, not the raw rows. The interval is a literal rendered from
+    the timedelta, never from a string from outside.
     """
     table_name, column_pairs, where = __select_parts(conf, duration, end)
+    if bucket is not None:
+        interval = __interval_literal(bucket)
+        bucket_columns = [f"max({source}) AS {dest}" for source, dest in column_pairs]
+        base_select = f"""SELECT
+                time_bucket({interval}, time) AS time,
+                {", ".join(bucket_columns)}
+            FROM
+                {table_name}
+            WHERE
+                {where}
+            GROUP BY 1"""
+        if not changes_only:
+            return f"""
+        {base_select}
+        ORDER BY 1 ASC
+    """
+    else:
+        base_select = None
     if not changes_only:
         columns = [f"{source} AS {dest}" for source, dest in column_pairs]
         return f"""
@@ -118,7 +145,15 @@ def __get_sql_reader_query(conf: InputTopic, duration: datetime.timedelta, end: 
         ORDER BY time ASC
     """
     dests = [dest for _, dest in column_pairs]
-    base_columns = [f"{source} AS {dest}" for source, dest in column_pairs]
+    if base_select is None:
+        base_columns = [f"{source} AS {dest}" for source, dest in column_pairs]
+        base_select = f"""SELECT
+                time,
+                {", ".join(base_columns)}
+            FROM
+                {table_name}
+            WHERE
+                {where}"""
     order = ", ".join(["time"] + dests)
     neighbours = ["lag(time) OVER w AS __prev_time", "lead(time) OVER w AS __next_time"]
     differs = []
@@ -129,13 +164,7 @@ def __get_sql_reader_query(conf: InputTopic, duration: datetime.timedelta, end: 
         differs.append(f"{dest} IS DISTINCT FROM __next_{i}")
     return f"""
         WITH base AS (
-            SELECT
-                time,
-                {", ".join(base_columns)}
-            FROM
-                {table_name}
-            WHERE
-                {where}
+            {base_select}
         ), neighbours AS (
             SELECT
                 time,
@@ -156,6 +185,15 @@ def __get_sql_reader_query(conf: InputTopic, duration: datetime.timedelta, end: 
             OR {" OR ".join(differs)}
         ORDER BY {order}
     """
+
+
+def __interval_literal(value: datetime.timedelta) -> str:
+    # Rendered from a whole number of seconds taken out of a timedelta, so
+    # nothing but digits reaches the query.
+    seconds = value.total_seconds()
+    if seconds <= 0 or seconds != int(seconds):
+        raise ValueError(f"an interval must be a positive whole number of seconds, got {value!r}")
+    return f"INTERVAL '{int(seconds)} seconds'"
 
 
 def __window_clause(duration: datetime.timedelta, end: typing.Optional[datetime.datetime]) -> str:
@@ -288,8 +326,45 @@ def __create_timescale_connection(conn_str: str) -> Psycopg2Connection:
 SQL_READ_ATTEMPTS = 3
 SQL_RETRY_PAUSE_S = 5
 
-SqlInputJob = typing.List[typing.Tuple[typing.Optional[str], InputTopic]]
-"""One input: its (device or None, topic of that single device) entries in order.
+@dataclasses.dataclass(frozen=True)
+class SqlOverride:
+    """
+    Per-input settings for reader="sql", keyed by the name of the operator input
+    (mapping.dest) in provide_historic_data's overrides.
+
+    duration replaces the history window of that input.
+    bucket reads the input as one row per time bucket of that size: the bucket
+    start as time and the maximum of the value in it. Only for numeric columns.
+    Both are whole, positive timedeltas for bucket (whole seconds), positive for duration.
+    """
+    duration: typing.Optional[datetime.timedelta] = None
+    bucket: typing.Optional[datetime.timedelta] = None
+
+    def __post_init__(self):
+        _check_sql_override(self)
+
+    @property
+    def is_empty(self) -> bool:
+        return self.duration is None and self.bucket is None
+
+
+def _check_sql_override(override: "SqlOverride"):
+    for name in ("duration", "bucket"):
+        value = getattr(override, name)
+        if value is None:
+            continue
+        if not isinstance(value, datetime.timedelta) or isinstance(value, bool):
+            raise ValueError(f"SqlOverride.{name} must be a timedelta, got {value!r}")
+        if value <= datetime.timedelta(0):
+            raise ValueError(f"SqlOverride.{name} must be positive, got {value!r}")
+    if override.bucket is not None:
+        __interval_literal(override.bucket)  # whole seconds, or ValueError
+
+
+SqlInputJob = typing.List[typing.Tuple]
+"""One input: its entries in order, each (device or None, topic of that single
+device) or (device or None, topic, overrides), overrides being {dest: SqlOverride}
+for the mappings of that topic that have one.
 The device is set, and becomes the column device_id, only for an input that names several."""
 
 
@@ -376,10 +451,10 @@ def __sql_input_datasets(conn_str: str, jobs: typing.List[SqlInputJob], duration
     try:
         for job in jobs:
             frames = []
-            for device, topic in job:
-                query = __get_sql_reader_query(topic, duration, end, changes_only)
-                frame = __read_table(state, conn_str, connect, query,
-                                     f"{topic.name} ({topic.filterValue})")
+            for entry in job:
+                device, topic = entry[0], entry[1]
+                overrides = entry[2] if len(entry) > 2 else None
+                frame = __read_topic_groups(state, conn_str, connect, topic, overrides, duration, end, changes_only)
                 if device is not None:
                     frame["device_id"] = device
                 frames.append(frame)
@@ -390,6 +465,52 @@ def __sql_input_datasets(conn_str: str, jobs: typing.List[SqlInputJob], duration
                 state["connection"].close()
             except Exception:
                 pass
+
+
+def __override_groups(topic: InputTopic, overrides) -> typing.List[typing.Tuple[typing.Optional[SqlOverride], InputTopic]]:
+    """
+    The mappings of one topic split by their override, in order of first
+    appearance: [(override or None, topic with only those mappings)]. Equal
+    overrides share a group, and so do the mappings without one; an override
+    with neither field set counts as none.
+    """
+    groups: typing.Dict[typing.Optional[SqlOverride], typing.List] = {}
+    for mapping in topic.mappings:
+        override = (overrides or {}).get(mapping.dest)
+        if override is not None and override.is_empty:
+            override = None
+        groups.setdefault(override, []).append(mapping)
+    if len(groups) == 1:
+        (override,) = groups
+        return [(override, topic)]
+    result = []
+    for override, mappings in groups.items():
+        sub = copy.deepcopy(topic)
+        sub.mappings = mappings
+        result.append((override, sub))
+    return result
+
+
+def __read_topic_groups(state, conn_str, connect, topic, overrides, duration, end, changes_only):
+    """
+    One device table: one query per group of mappings that share an override,
+    the frames put one under the other (a column of another group is NaN) and
+    sorted by time. A topic without any override is one plain query.
+    """
+    import pandas as pd
+    frames = []
+    for override, group in __override_groups(topic, overrides):
+        group_duration = override.duration if override is not None and override.duration is not None else duration
+        bucket = override.bucket if override is not None else None
+        query = __get_sql_reader_query(group, group_duration, end, changes_only, bucket)
+        frames.append(__read_table(state, conn_str, connect, query,
+                                   f"{topic.name} ({topic.filterValue})"))
+    if len(frames) == 1:
+        return frames[0]
+    columns = ["time"] + [m.dest for m in topic.mappings]
+    filled = [f for f in frames if len(f)] or frames[:1]
+    merged = pd.concat(filled, ignore_index=True).reindex(columns=columns)
+    return merged.sort_values("time", kind="stable", ignore_index=True)
 
 
 def get_timescale_sql_datasets_local(conn_str: str, jobs: typing.List[SqlInputJob], duration: datetime.timedelta, end: datetime.datetime, changes_only: bool = False, connect=None) -> typing.List[ray.data.Dataset]:

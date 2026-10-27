@@ -16,8 +16,9 @@
 
 # The SQL of the SQL reader against a real PostgreSQL. Skipped without
 # TEST_PG_DSN, e.g.
-#   docker run -d --rm --name pg5036 -e POSTGRES_PASSWORD=test -p 55432:5432 postgres:16-alpine
+#   docker run -d --rm --name pg5036 -e POSTGRES_PASSWORD=test -p 55432:5432 timescale/timescaledb:latest-pg16
 #   TEST_PG_DSN=postgresql://postgres:test@localhost:55432/postgres python -m unittest tests.test_sql_reader_pg
+# The bucket queries use time_bucket, so the server must be TimescaleDB; the test creates the extension.
 # The tables are created for the test and dropped after it.
 
 import datetime
@@ -29,7 +30,7 @@ import pandas as pd
 import psycopg2
 import ray
 
-from operator_lib.util.helpers import timescale
+from operator_lib.util.helpers import timescale, SqlOverride
 from operator_lib.util.model import InputTopic
 
 PG_DSN = os.environ.get("TEST_PG_DSN")
@@ -38,7 +39,7 @@ E = datetime.datetime(2026, 6, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
 DURATION = timedelta(hours=6)
 START = E - DURATION
 SERVICE = "urn_infai_ses_service_1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d"
-DEVICES = {name: f"{i:08x}-0000-4000-8000-000000000000" for i, name in enumerate(["plain", "reversed", "nulls", "short"], start=1)}
+DEVICES = {name: f"{i:08x}-0000-4000-8000-000000000000" for i, name in enumerate(["plain", "reversed", "nulls", "short", "power"], start=1)}
 
 _quote = getattr(timescale, "__quote_identifier")
 _table_name = getattr(timescale, "__get_table_name")
@@ -75,6 +76,30 @@ EXPECTED_CHANGES_ONLY = [
     (90, 3, "y"), (90, 3, "y"), (90, 4, "y"), (110, 4, "y"),
 ]
 
+# (seconds after START, power). The buckets of one minute and their maximum:
+# 0: 5, 1: 5, 2: 7, 3: 7, 4: 7, 8: 1, everything else is outside or empty.
+POWER_ROWS = [
+    (-60, 99.0),                    # before the window: never read
+    (0, 3.0), (30, 5.0),            # bucket 0, maximum 5, the second value is not the last in the table order below
+    (70, 5.0), (100, 2.0),          # bucket 1, maximum 5 although the last value is 2
+    (120, 7.0),                     # bucket 2
+    (195, 7.0),                     # bucket 3
+    (260, 7.0),                     # bucket 4
+    (481, 1.0),                     # bucket 8: the bucket start is 8 minutes, not the row's second
+    (360 * 60, 77.0),               # at the end bound: the window is half-open, never read
+]
+BUCKET_MAX = [(0, 5.0), (1, 5.0), (2, 7.0), (3, 7.0), (4, 7.0), (8, 1.0)]
+BUCKET_CHANGES_ONLY = [(0, 5.0), (1, 5.0), (2, 7.0), (4, 7.0), (8, 1.0)]
+
+
+def _power_topic(device):
+    return InputTopic({
+        "name": SERVICE,
+        "filterType": "DeviceId",
+        "filterValue": device,
+        "mappings": [{"dest": "power", "source": "value.power"}, {"dest": "temp", "source": "value.temp"}],
+    })
+
 
 @unittest.skipUnless(PG_DSN, "TEST_PG_DSN is not set")
 class TestSqlReaderAgainstPostgres(unittest.TestCase):
@@ -85,14 +110,21 @@ class TestSqlReaderAgainstPostgres(unittest.TestCase):
         cls.conn = psycopg2.connect(PG_DSN)
         cls.conn.autocommit = True
         cur = cls.conn.cursor()
+        cur.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
         for device, table in cls.tables.items():
             cur.execute(f'DROP TABLE IF EXISTS {table}')
-            cur.execute(f'CREATE TABLE {table} (time timestamptz NOT NULL, "temp" integer, "mode" text)')
+            if device == "power":
+                cur.execute(f'CREATE TABLE {table} (time timestamptz NOT NULL, "power" double precision, "temp" integer)')
+            else:
+                cur.execute(f'CREATE TABLE {table} (time timestamptz NOT NULL, "temp" integer, "mode" text)')
         cls._insert("plain", ROWS)
         # The same rows, written in the opposite physical order: the answer must not depend on it.
         cls._insert("reversed", list(reversed(ROWS)))
         cls._insert("nulls", [(0, None, "x"), (10, None, "x"), (20, None, "x")])
         cls._insert("short", [(60, 5, "x")])
+        for seconds, power in POWER_ROWS:
+            cur.execute(f'INSERT INTO {cls.tables["power"]} (time, "power", "temp") VALUES (%s, %s, %s)',
+                        (START + timedelta(seconds=seconds), power, seconds // 60))
 
     @classmethod
     def _insert(cls, device, rows):
@@ -155,6 +187,61 @@ class TestSqlReaderAgainstPostgres(unittest.TestCase):
         (ds,) = timescale.get_timescale_sql_datasets_local(PG_DSN, job, DURATION, E, True)
         frame = ds.to_pandas()
         self.assertEqual({DEVICES["plain"]: 10, DEVICES["short"]: 1}, frame["device_id"].value_counts().to_dict())
+
+    def _read_power(self, overrides, changes_only=False, duration=DURATION, topic=None):
+        job = [[(None, topic or _power_topic(DEVICES["power"]), overrides)]]
+        (ds,) = timescale.get_timescale_sql_datasets_local(PG_DSN, job, duration, E, changes_only)
+        return ds.to_pandas()
+
+    def _minutes(self, frame, column):
+        start = START.replace(tzinfo=None)
+        return [(int((t - start).total_seconds() // 60), None if pd.isna(v) else float(v))
+                for t, v in zip(frame["time"], frame[column])]
+
+    def _bucket_topic(self):
+        topic = _power_topic(DEVICES["power"])
+        topic.mappings = topic.mappings[:1]
+        return topic
+
+    def test_the_bucket_is_the_maximum_per_minute_at_the_bucket_start(self):
+        frame = self._read_power({"power": SqlOverride(bucket=timedelta(minutes=1))}, topic=self._bucket_topic())
+        self.assertEqual(BUCKET_MAX, self._minutes(frame, "power"))
+        self.assertEqual({0}, set(frame["time"].dt.second))
+
+    def test_changes_only_compares_the_bucket_rows(self):
+        frame = self._read_power({"power": SqlOverride(bucket=timedelta(minutes=1))}, True, topic=self._bucket_topic())
+        self.assertEqual(BUCKET_CHANGES_ONLY, self._minutes(frame, "power"))
+
+    def test_a_larger_bucket_takes_the_maximum_of_all_its_rows(self):
+        frame = self._read_power({"power": SqlOverride(bucket=timedelta(minutes=5))}, topic=self._bucket_topic())
+        # START is on the 5 minute grid of time_bucket's origin
+        self.assertEqual([(0, 7.0), (5, 1.0)], self._minutes(frame, "power"))
+
+    def test_the_duration_override_narrows_the_window_of_its_group(self):
+        frame = self._read_power({"power": SqlOverride(duration=timedelta(minutes=5), bucket=timedelta(minutes=1))},
+                                 topic=self._bucket_topic(), duration=timedelta(days=1))
+        # the window is [E - 5 min, E): the rows are all in the first minutes after START, hours before
+        self.assertEqual(0, len(frame))
+        frame = self._read_power({"power": SqlOverride(duration=timedelta(days=1))}, topic=self._bucket_topic(), duration=timedelta(minutes=5))
+        # a longer window of its own than the call's: the row before START is in it now
+        self.assertEqual(sorted(p for sec, p in POWER_ROWS if sec < 360 * 60), sorted(frame["power"]))
+        self.assertEqual(9, len(frame))
+
+    def test_a_mixed_topic_has_raw_rows_for_one_group_and_bucket_rows_for_the_other(self):
+        frame = self._read_power({"power": SqlOverride(bucket=timedelta(minutes=1))})
+        self.assertEqual(["time", "power", "temp"], list(frame.columns))
+        self.assertTrue(frame["time"].is_monotonic_increasing)
+        raw, buckets = frame[frame["temp"].notna()], frame[frame["power"].notna()]
+        self.assertEqual(8, len(raw))                      # every raw row of the window, power NaN
+        self.assertTrue(raw["power"].isna().all())
+        self.assertEqual(BUCKET_MAX, self._minutes(buckets, "power"))
+        self.assertTrue(buckets["temp"].isna().all())
+        self.assertEqual(8 + 6, len(frame))
+
+    def test_a_mixed_topic_with_changes_only_reduces_each_group_on_its_own(self):
+        frame = self._read_power({"power": SqlOverride(bucket=timedelta(minutes=1))}, True)
+        self.assertEqual(BUCKET_CHANGES_ONLY, self._minutes(frame[frame["power"].notna()], "power"))
+        self.assertTrue(frame[frame["temp"].notna()]["power"].isna().all())
 
 
 if __name__ == "__main__":

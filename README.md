@@ -61,3 +61,20 @@ A table that fails with a connection error is read again on a new connection, 3 
 `changes_only=True` (only with `reader="sql"`) keeps, per table, the rows whose value differs from the previous or the next row in at least one mapped column. Periodic repeats of an unchanged value drop out, the first and the last row of the window stay, and so does every distinct value of rows that share a timestamp. The rows are ordered by time and then by the mapped columns.
 
 `reader="sql"` with `require_full_duration=True` raises `ValueError`: waiting inside the single task would block every other input.
+
+### Per-input settings: `overrides`
+
+`provide_historic_data(..., reader="sql", overrides={"<input name>": SqlOverride(duration=..., bucket=...)})` changes how single inputs are read. The key is the name of the operator input (`mapping.dest`); `provide_historic_data_local` takes the same parameter. Without `reader="sql"`, or with a key that is no input, it raises `ValueError`; an override for an input that is not read over the database connection is ignored with a warning.
+
+```python
+from operator_lib.util.helpers import provide_historic_data, SqlOverride
+
+provide_historic_data(
+    timedelta(days=365), reader="sql", changes_only=True,
+    overrides={"power": SqlOverride(duration=timedelta(days=90), bucket=timedelta(seconds=60))},
+)
+```
+
+- `duration` replaces the window of that input; it ends at the same point as the others.
+- `bucket` reads the input as one row per time bucket: `time_bucket(<bucket>, time)` as `time` and `max(<column>)` as the value. This needs TimescaleDB and numeric columns (`max` does not exist for booleans, and for text it would silently pick the largest string). `bucket` must be a whole number of seconds greater than zero. Empty buckets are not filled. `changes_only` then compares the bucket rows, not the raw rows.
+- A topic whose mappings differ in their override is read with one query per group (mappings with the same override, and those without one) and the rows are put one under the other, sorted by time. The columns of the other groups are NaN in them, so integer columns come back as floats. For an input with several devices this happens per device, and `device_id` is set as before.

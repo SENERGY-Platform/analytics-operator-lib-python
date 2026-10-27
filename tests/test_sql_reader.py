@@ -27,7 +27,9 @@ import ray
 import operator_lib.util as util
 from operator_lib.util.config import MissingConfigValueError
 from operator_lib.util.helpers import data, timescale
+from operator_lib.util.helpers import SqlOverride
 from operator_lib.util.logger import logger
+from operator_lib.util.model import InputTopic
 
 E = datetime.datetime(2026, 6, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
 SERVICE_UUID = "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d"
@@ -76,9 +78,13 @@ class FakeCursor:
         if self.conn.fail_queries:
             self.conn.fail_queries -= 1
             raise psycopg2.OperationalError(f"server closed the connection ({DSN})")
-        self.description = [("time",), ("temp",)]
+        dests = list(dict.fromkeys(re.findall(r'AS "([^"]+)"', query)))
+        self.description = [("time",)] + [(d,) for d in dests]
         base = datetime.datetime(2026, 5, 31, tzinfo=datetime.timezone.utc)
-        self.rows = [(base + timedelta(hours=h), float(ord(device) + h)) for h in (1, 2)]
+        # a bucket query returns its rows half an hour after the plain ones
+        offset = 30 if "time_bucket" in query else 0
+        self.rows = [(base + timedelta(hours=h, minutes=offset), float(ord(device) + h)) for h in (1, 2)]
+        self.rows = [(t,) + (v,) * len(dests) for t, v in self.rows]
 
     def fetchall(self):
         return self.rows
@@ -215,6 +221,141 @@ class TestSqlLocal(_Base):
         self.assertEqual([], self.db.conns)
 
 
+def _two_input_topic(filter_value):
+    return {
+        "name": SERVICE_TOPIC,
+        "filterType": "DeviceId",
+        "filterValue": filter_value,
+        "mappings": [{"dest": "temp", "source": "value.temp"}, {"dest": "power", "source": "value.power"}],
+    }
+
+
+class TestOverrides(_Base):
+    topics = [_two_input_topic(_dev("a")), _two_input_topic(_dev("b", "c"))]
+    bucket = SqlOverride(duration=timedelta(days=90), bucket=timedelta(seconds=60))
+
+    @classmethod
+    def setUpClass(cls):
+        ray.init(num_cpus=1, include_dashboard=False, ignore_reinit_error=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        ray.shutdown()
+
+    def _read(self, overrides, changes_only=False):
+        return data.provide_historic_data_local(timedelta(days=1), reader="sql", changes_only=changes_only, overrides=overrides)
+
+    def test_a_topic_without_a_matching_override_is_one_plain_query(self):
+        for overrides in (None, {}, {"temp": SqlOverride()}):
+            with self.subTest(overrides=overrides):
+                self.db.conns.clear()
+                self._read(overrides)
+                self.assertEqual(3, len(self.db.queries))
+                self.assertTrue(all("time_bucket" not in q for q in self.db.queries))
+
+    def test_a_mixed_topic_is_read_per_group_and_put_together_sorted_by_time(self):
+        single, multi = self._read({"power": self.bucket})
+        # a: 2 groups, b and c: 2 groups each
+        self.assertEqual(6, len(self.db.queries))
+        frame = single.to_pandas()
+        self.assertEqual(["time", "temp", "power"], list(frame.columns))
+        self.assertTrue(frame["time"].is_monotonic_increasing)
+        self.assertEqual(4, len(frame))
+        plain, bucketed = frame[frame["temp"].notna()], frame[frame["power"].notna()]
+        self.assertEqual(2, len(plain))
+        self.assertTrue(plain["power"].isna().all())
+        self.assertEqual(2, len(bucketed))
+        self.assertTrue(bucketed["temp"].isna().all())
+        self.assertEqual({30}, set(bucketed["time"].dt.minute))  # the bucket rows are the second group's
+        self.assertEqual({0}, set(plain["time"].dt.minute))
+
+    def test_a_mixed_multi_device_input_is_sorted_per_device(self):
+        multi = self._read({"power": self.bucket})[1].to_pandas()
+        self.assertEqual({DEVICES["b"], DEVICES["c"]}, set(multi["device_id"]))
+        for device, rows in multi.groupby("device_id", sort=False):
+            self.assertEqual(4, len(rows))
+            self.assertTrue(rows["time"].is_monotonic_increasing, device)
+        # the devices stay together, in config order, as without overrides
+        self.assertEqual([DEVICES["b"]] * 4 + [DEVICES["c"]] * 4, list(multi["device_id"]))
+
+    def test_mappings_with_the_same_override_share_one_query(self):
+        self._read({"temp": self.bucket, "power": SqlOverride(duration=timedelta(days=90), bucket=timedelta(seconds=60))})
+        self.assertEqual(3, len(self.db.queries))
+        for q in self.db.queries:
+            self.assertIn("time_bucket(INTERVAL '60 seconds', time)", q)
+            self.assertEqual(2, q.count("max("))
+
+    def test_the_window_is_per_group(self):
+        self._read({"power": SqlOverride(duration=timedelta(days=90))})
+        a_queries = [q for q in self.db.queries if f'"{_table("a")}"' in q]
+        self.assertEqual(2, len(a_queries))
+        plain = next(q for q in a_queries if '"temp"' in q)
+        long = next(q for q in a_queries if '"power"' in q)
+        self.assertIn("TIMESTAMPTZ '2026-05-31T12:00:00.000000+00:00'", plain)
+        self.assertIn("TIMESTAMPTZ '2026-03-03T12:00:00.000000+00:00'", long)
+        self.assertNotIn("time_bucket", long)  # a duration alone does not bucket
+        self.assertIn("TIMESTAMPTZ '2026-06-01T12:00:00.000000+00:00'", long)  # same end
+
+    def test_bucket_query_takes_the_maximum_per_bucket(self):
+        self._read({"power": SqlOverride(bucket=timedelta(minutes=1))})
+        q = next(q for q in self.db.queries if "time_bucket" in q)
+        self.assertIn('time_bucket(INTERVAL \'60 seconds\', time) AS time', q)
+        self.assertIn('max("power") AS "power"', q)
+        self.assertNotIn('"temp"', q)
+        self.assertIn("GROUP BY 1", q)
+        self.assertNotIn("IS DISTINCT FROM", q)
+
+    def test_changes_only_works_on_the_bucket_rows(self):
+        self._read({"power": self.bucket}, changes_only=True)
+        q = next(q for q in self.db.queries if "time_bucket" in q)
+        self.assertRegex(q, r"WITH base AS \(\s+SELECT\s+time_bucket\(INTERVAL '60 seconds', time\) AS time,")
+        self.assertIn("GROUP BY 1\n        ), neighbours AS (", q)
+        self.assertIn('"power" IS DISTINCT FROM __prev_0', q)
+        plain = next(q for q in self.db.queries if "time_bucket" not in q)
+        self.assertIn("IS DISTINCT FROM", plain)
+
+    def test_an_override_for_an_input_not_read_over_the_dsn_is_logged(self):
+        topics = [_two_input_topic(_dev("a")), _topic_dict("analytics-upstream", "OperatorId", "op:pipe")]
+        topics[1]["mappings"] = [{"dest": "other", "source": "value.other"}]
+        opr = {"inputTopics": topics, "config": {"ts_conn": DSN}}
+        with mock.patch.object(util, "load_operator_config_json", return_value=opr):
+            with self.assertLogs(logger, level="WARNING") as logs:
+                data.provide_historic_data_local(timedelta(days=1), reader="sql", overrides={"other": self.bucket})
+        self.assertTrue(any("'other'" in line and "ignored" in line for line in logs.output))
+
+    def test_parameter_errors(self):
+        for f in (data.provide_historic_data, data.provide_historic_data_local):
+            with self.subTest(f=f.__name__):
+                with self.assertRaisesRegex(ValueError, "overrides need"):
+                    f(timedelta(days=1), overrides={"power": self.bucket})
+                with self.assertRaisesRegex(ValueError, "overrides need"):
+                    f(timedelta(days=1), reader="dataset", overrides={})
+                with self.assertRaisesRegex(ValueError, "SqlOverride"):
+                    f(timedelta(days=1), reader="sql", overrides={"power": {"bucket": 60}})
+                with self.assertRaisesRegex(ValueError, "SqlOverride"):
+                    f(timedelta(days=1), reader="sql", overrides=[("power", self.bucket)])
+        with self.assertRaisesRegex(ValueError, "no input: 'powr'"):
+            self._read({"powr": self.bucket})
+        self.assertEqual([], self.db.conns)
+
+    def test_override_values_are_checked(self):
+        for kwargs in ({"bucket": timedelta(0)}, {"bucket": timedelta(seconds=-5)}, {"bucket": timedelta(seconds=1.5)},
+                       {"bucket": timedelta(milliseconds=500)}, {"bucket": 60}, {"bucket": "60 seconds"},
+                       {"duration": timedelta(0)}, {"duration": -timedelta(days=1)}, {"duration": 5}):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(ValueError):
+                    SqlOverride(**kwargs)
+        self.assertEqual(timedelta(minutes=2), SqlOverride(bucket=timedelta(minutes=2)).bucket)
+
+    def test_the_bucket_literal_is_built_from_the_number_of_seconds_only(self):
+        build = getattr(timescale, "__get_sql_reader_query")
+        topic = InputTopic(_two_input_topic(_dev("a")))
+        query = build(topic, timedelta(days=1), E, False, timedelta(hours=1, seconds=30))
+        self.assertIn("INTERVAL '3630 seconds'", query)
+        with self.assertRaises(ValueError):
+            build(topic, timedelta(days=1), E, False, timedelta(milliseconds=1500))
+
+
 class TestParameterChecks(_Base):
     topics = [_topic_dict(SERVICE_TOPIC, "DeviceId", _dev("a"))]
 
@@ -345,6 +486,16 @@ class TestSqlRemote(_Base):
             result = data.provide_historic_data(timedelta(days=1), reader="sql")
         frames = [ray.get(r).to_pandas() for r in result]
         self.assertEqual([4, 1, 2], [len(f) for f in frames])
+
+    def test_overrides_travel_to_the_task(self):
+        self._use([_two_input_topic(_dev("a")), _two_input_topic(_dev("b"))])
+        result = data.provide_historic_data(timedelta(days=1), reader="sql", changes_only=True,
+                                            overrides={"power": SqlOverride(duration=timedelta(days=90), bucket=timedelta(minutes=1))})
+        frames = [ray.get(r).to_pandas() for r in result]
+        for frame in frames:
+            self.assertEqual(["time", "temp", "power"], list(frame.columns))
+            self.assertEqual(4, len(frame))
+            self.assertTrue(frame["time"].is_monotonic_increasing)
 
     def test_a_failing_input_takes_itself_and_the_later_ones_not_the_earlier_ones(self):
         self._use([self.topics[0], _topic_dict(SERVICE_TOPIC, "DeviceId", _dev("d")), self.topics[1]])
