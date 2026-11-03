@@ -50,7 +50,24 @@ The CI of an operator repository commits the manifest before tagging a version, 
 
 ## History of inputs with several devices
 
-An input assigned several devices (comma-separated in its `filterValue`) is still one dataset in `provide_historic_data`, `provide_historic_data_local` and `read_input_window`: the rows of every device, with an added column `device_id` naming the device. An input with one device has no such column.
+An input assigned several devices (comma-separated in its `filterValue`) is still one dataset in `provide_historic_data`, `provide_historic_data_local` and `read_input_window` (one frame in `provide_historic_frames_local`): the rows of every device, with an added column `device_id` naming the device. An input with one device has no such column.
+
+## Reading history without Ray: `provide_historic_frames_local`
+
+`provide_historic_data_local` returns Ray datasets. Without a connection to a cluster, its first call starts a local Ray instance, which took about 2 GB of memory in our measurements and stays for the life of the process. An `MLOperator` runs `infer()` in exactly that state, after training has disconnected. While connected through Ray Client, as during the evaluation replay, the read fails.
+
+`provide_historic_frames_local` takes the same parameters and returns the same history as one pandas `DataFrame` per input, in config order, read in the calling process without Ray. Devices and imports with an export are read over the database connection or timescale-wrapper as before.
+
+An input whose history only Kafka has raises `HistoryNeedsRayError`: the output of another operator, an import without an entry in `import_exports`, or any input while `ALWAYS_PREFER_KAFKA` is set. Read it with `provide_historic_data_local`:
+
+```python
+from operator_lib.util.helpers import HistoryNeedsRayError, provide_historic_data_local, provide_historic_frames_local
+
+try:
+    frames = provide_historic_frames_local(timedelta(hours=8))
+except HistoryNeedsRayError:
+    frames = [ds.to_pandas() for ds in provide_historic_data_local(timedelta(hours=8))]
+```
 
 ## Reading history with `reader="sql"`
 

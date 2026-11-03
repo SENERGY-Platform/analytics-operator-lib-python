@@ -1,2 +1,2 @@
-from .data import provide_historic_data, provide_historic_data_local, SqlOverride
+from .data import provide_historic_data, provide_historic_data_local, provide_historic_frames_local, HistoryNeedsRayError, SqlOverride
 from .mlflow_logger import TrainMlflowLogger

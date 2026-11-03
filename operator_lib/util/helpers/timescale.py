@@ -28,6 +28,13 @@ def get_timescale_dataset_remote(conn_str: str, conf: InputTopic, duration: date
     return ds
 
 def get_timescale_dataset_local(conn_str: str, conf: InputTopic, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> ray.data.Dataset:
+    return ray.data.from_pandas(read_timescale_frame(conn_str, conf, duration, require_full_duration, end))
+
+def read_timescale_frame(conn_str: str, conf: InputTopic, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> "pandas.DataFrame":
+    """
+    get_timescale_dataset_local without Ray: the same rows as a pandas frame,
+    read in the calling process.
+    """
     query = __get_timescale_dataset_query(conn_str, conf, duration, require_full_duration, end)
     conn = __create_timescale_connection(conn_str)
     import pandas as pd
@@ -35,13 +42,13 @@ def get_timescale_dataset_local(conn_str: str, conf: InputTopic, duration: datet
     data = sqlio.read_sql_query(query, conn)
 
     # Ray+PyArrow cannot infer timezone-aware pandas dtypes like datetime64[ns, UTC].
-    # Normalize all tz-aware datetime columns to UTC-naive datetimes before ingestion.
+    # Normalize all tz-aware datetime columns to UTC-naive datetimes before ingestion;
+    # the frame without Ray gets the same columns.
     for col in data.columns:
         if pd.api.types.is_datetime64tz_dtype(data[col].dtype):
             data[col] = data[col].dt.tz_convert("UTC").dt.tz_localize(None)
 
-    ds = ray.data.from_pandas(data)
-    return ds
+    return data
 
 def __timestamptz_literal(dt: datetime.datetime) -> str:
     # Rendered from a datetime object, never from a string that arrived from
@@ -257,6 +264,14 @@ def get_export_dataset_remote(conn_str: str, conf: InputTopic, entry: ImportExpo
 
 
 def get_export_dataset_local(conn_str: str, conf: InputTopic, entry: ImportExport, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> ray.data.Dataset:
+    return ray.data.from_pandas(read_export_frame(conn_str, conf, entry, duration, require_full_duration, end))
+
+
+def read_export_frame(conn_str: str, conf: InputTopic, entry: ImportExport, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> "pandas.DataFrame":
+    """
+    get_export_dataset_local without Ray: the same rows as a pandas frame, read
+    in the calling process.
+    """
     query = __get_export_dataset_query(conn_str, conf, entry, duration, require_full_duration, end)
     conn = __create_timescale_connection(conn_str)
     import pandas as pd
@@ -267,7 +282,7 @@ def get_export_dataset_local(conn_str: str, conf: InputTopic, entry: ImportExpor
         if pd.api.types.is_datetime64tz_dtype(data[col].dtype):
             data[col] = data[col].dt.tz_convert("UTC").dt.tz_localize(None)
 
-    return ray.data.from_pandas(data)
+    return data
 
 
 def __get_export_dataset_query(conn_str: str, conf: InputTopic, entry: ImportExport, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> str:
@@ -439,9 +454,9 @@ def __read_table(state: dict, conn_str: str, connect, query: str, label: str):
         time.sleep(SQL_RETRY_PAUSE_S)
 
 
-def __sql_input_datasets(conn_str: str, jobs: typing.List[SqlInputJob], duration: datetime.timedelta, end: datetime.datetime, changes_only: bool, connect):
+def __sql_input_frames(conn_str: str, jobs: typing.List[SqlInputJob], duration: datetime.timedelta, end: datetime.datetime, changes_only: bool, connect):
     """
-    Yield one dataset per job, in order, reading one table after the other over
+    Yield one pandas frame per job, in order, reading one table after the other over
     one connection. A generator, so that a caller which wants the inputs one by
     one (the remote task, whose returns are separate object refs) gets each as
     soon as it is read and a failure only takes the inputs from the failing one on.
@@ -458,7 +473,7 @@ def __sql_input_datasets(conn_str: str, jobs: typing.List[SqlInputJob], duration
                 if device is not None:
                     frame["device_id"] = device
                 frames.append(frame)
-            yield ray.data.from_pandas(frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True))
+            yield frames[0] if len(frames) == 1 else pd.concat(frames, ignore_index=True)
     finally:
         if state.get("connection") is not None:
             try:
@@ -514,11 +529,18 @@ def __read_topic_groups(state, conn_str, connect, topic, overrides, duration, en
 
 
 def get_timescale_sql_datasets_local(conn_str: str, jobs: typing.List[SqlInputJob], duration: datetime.timedelta, end: datetime.datetime, changes_only: bool = False, connect=None) -> typing.List[ray.data.Dataset]:
-    return list(__sql_input_datasets(conn_str, jobs, duration, end, changes_only, connect or __create_timescale_connection))
+    return [ray.data.from_pandas(frame)
+            for frame in read_timescale_sql_frames(conn_str, jobs, duration, end, changes_only, connect)]
+
+
+def read_timescale_sql_frames(conn_str: str, jobs: typing.List[SqlInputJob], duration: datetime.timedelta, end: datetime.datetime, changes_only: bool = False, connect=None) -> typing.List["pandas.DataFrame"]:
+    """get_timescale_sql_datasets_local without Ray: one pandas frame per job."""
+    return list(__sql_input_frames(conn_str, jobs, duration, end, changes_only, connect or __create_timescale_connection))
 
 
 @ray.remote
 def get_timescale_sql_datasets_remote(conn_str: str, jobs: typing.List[SqlInputJob], duration: datetime.timedelta, end: datetime.datetime, changes_only: bool = False, connect=None):
     # A generator: called with num_returns = len(jobs), every yield becomes the
     # object ref of one input, also for a single input (then .remote returns one ref).
-    yield from __sql_input_datasets(conn_str, jobs, duration, end, changes_only, connect or __create_timescale_connection)
+    for frame in __sql_input_frames(conn_str, jobs, duration, end, changes_only, connect or __create_timescale_connection):
+        yield ray.data.from_pandas(frame)

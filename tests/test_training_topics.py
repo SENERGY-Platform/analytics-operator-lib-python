@@ -221,7 +221,7 @@ class TestRoleSelection(unittest.TestCase):
     provide_historic_data, provide_historic_data_local and read_input_window
     choose the topic list in the driver. __read_topic -- the dispatch to the
     readers, which run on Ray workers with the cluster image's library -- is
-    replaced here by a function with exactly its own seven parameters, so a
+    replaced here by a function with exactly its own eight parameters, so a
     role reaching it would fail the call.
     """
 
@@ -246,7 +246,7 @@ class TestRoleSelection(unittest.TestCase):
         self.addCleanup(patch.stop)
 
     @staticmethod
-    def _read_topic(config, dep_config, topic, duration, require_full_duration, remote, end):
+    def _read_topic(config, dep_config, topic, duration, require_full_duration, remote, end, frames=False):
         frame = pd.DataFrame({"time": [], topic.mappings[0].dest: []})
         return types.SimpleNamespace(topic=topic, to_pandas=lambda: frame)
 
@@ -285,10 +285,10 @@ class TestRoleSelection(unittest.TestCase):
         data.provide_historic_data_local(timedelta(days=1), True, role="training")
         call = self.read_topic.call_args_list[0]
         self.assertEqual({}, call.kwargs)
-        self.assertEqual(7, len(call.args))
+        self.assertEqual(8, len(call.args))
         self.assertEqual(SUB_METER, call.args[2].filterValue)
-        # duration, require_full_duration, remote, and the clock's bound.
-        self.assertEqual((timedelta(days=1), True, False, TRAINING_END), call.args[3:])
+        # duration, require_full_duration, remote, the clock's bound, and frames.
+        self.assertEqual((timedelta(days=1), True, False, TRAINING_END, False), call.args[3:])
 
     def test_an_unknown_role_raises_before_the_config_is_read(self):
         calls = {

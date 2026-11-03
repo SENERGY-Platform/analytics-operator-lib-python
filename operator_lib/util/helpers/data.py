@@ -5,12 +5,12 @@ import typing
 import operator_lib.util as util
 from operator_lib.util import clock
 from operator_lib.util.model import InputTopic
-from operator_lib.util.helpers.timescale import get_timescale_dataset_local, get_timescale_dataset_remote
-from operator_lib.util.helpers.timescale import get_timescale_sql_datasets_local, get_timescale_sql_datasets_remote, SqlOverride
-from operator_lib.util.helpers.timescale import get_export_dataset_local, get_export_dataset_remote
+from operator_lib.util.helpers.timescale import get_timescale_dataset_local, get_timescale_dataset_remote, read_timescale_frame
+from operator_lib.util.helpers.timescale import get_timescale_sql_datasets_local, get_timescale_sql_datasets_remote, read_timescale_sql_frames, SqlOverride
+from operator_lib.util.helpers.timescale import get_export_dataset_local, get_export_dataset_remote, read_export_frame
 from operator_lib.util.helpers.kafka import get_kafka_dataset_local, get_kafka_dataset_remote
-from operator_lib.util.helpers.ts_wrapper import get_ts_wrapper_dataset_local, get_ts_wrapper_dataset_remote
-from operator_lib.util.helpers.ts_wrapper import get_ts_wrapper_export_dataset_local, get_ts_wrapper_export_dataset_remote
+from operator_lib.util.helpers.ts_wrapper import get_ts_wrapper_dataset_local, get_ts_wrapper_dataset_remote, read_history
+from operator_lib.util.helpers.ts_wrapper import get_ts_wrapper_export_dataset_local, get_ts_wrapper_export_dataset_remote, read_export_history
 from operator_lib.util.helpers.exports import find_import_export
 from operator_lib.util.config import MissingConfigValueError
 from operator_lib.util.logger import logger
@@ -107,12 +107,32 @@ def provide_historic_data_local(duration: datetime.timedelta, require_full_durat
     Compared to provide_historic_data, this method has better performance, but comes with the drawback that it will load all data into memory. Therefore, it should only be used if the amount of data is small enough to fit into memory.
     role selects the topics exactly as in provide_historic_data: "input" (the default) or "training".
     reader, changes_only and overrides as in provide_historic_data; with reader="sql" the query runs in the calling process.
+    The datasets need Ray: without a connection to a cluster, the first call starts a local Ray instance, which stays for the life of the process. provide_historic_frames_local reads the same history without Ray.
     """
 
     return __provide_historic_data(duration, require_full_duration, False, role=role, reader=reader, changes_only=changes_only, overrides=overrides)
 
 
-def __provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False, remote: bool = True, end: typing.Optional[datetime.datetime] = None, role: str = "input", reader: str = "dataset", changes_only: bool = False, overrides: typing.Optional[typing.Mapping[str, SqlOverride]] = None):
+class HistoryNeedsRayError(RuntimeError):
+    """
+    Raised by provide_historic_frames_local for an input whose history only
+    Kafka has, which cannot be read without Ray: the output of another
+    operator, an import without an entry in import_exports, or any input while
+    ALWAYS_PREFER_KAFKA is set. Read such an input with provide_historic_data_local.
+    """
+
+
+def provide_historic_frames_local(duration: datetime.timedelta, require_full_duration: bool = False, role: str = "input", reader: str = "dataset", changes_only: bool = False, overrides: typing.Optional[typing.Mapping[str, SqlOverride]] = None) -> typing.List["pandas.DataFrame"]:
+    """
+    provide_historic_data_local without Ray: the same history as one pandas frame per input topic, in config order, read in the calling process. For infer(), where provide_historic_data_local starts a whole local Ray instance when the operator is not connected to a cluster, and fails while it is connected through Ray Client.
+    Inputs whose history is in Timescale -- devices, and imports with an entry in import_exports -- are read over the database connection or timescale-wrapper, exactly as provide_historic_data_local reads them. An input whose history only Kafka has raises HistoryNeedsRayError.
+    All parameters as in provide_historic_data_local.
+    """
+
+    return __provide_historic_data(duration, require_full_duration, False, role=role, reader=reader, changes_only=changes_only, overrides=overrides, frames=True)
+
+
+def __provide_historic_data(duration: datetime.timedelta, require_full_duration: bool = False, remote: bool = True, end: typing.Optional[datetime.datetime] = None, role: str = "input", reader: str = "dataset", changes_only: bool = False, overrides: typing.Optional[typing.Mapping[str, SqlOverride]] = None, frames: bool = False):
     # The bound comes from the clock, the clock from the deployment config.
     # Operator code -- which train()/infer() are -- never passes an end of its
     # own; it has nothing to pass. Resolved here in the driver rather than
@@ -131,9 +151,9 @@ def __provide_historic_data(duration: datetime.timedelta, require_full_duration:
     opr_config = util.OperatorConfig(config_json)
     topics = _topics_for_role(opr_config, role)
     if reader == "sql":
-        return __read_topics_sql(opr_config.config, dep_config, topics, duration, remote, end, changes_only, overrides)
+        return __read_topics_sql(opr_config.config, dep_config, topics, duration, remote, end, changes_only, overrides, frames)
     for topic in topics:
-        ds.append(__read_topic(opr_config.config, dep_config, topic, duration, require_full_duration, remote, end))
+        ds.append(__read_topic(opr_config.config, dep_config, topic, duration, require_full_duration, remote, end, frames))
     return ds
 
 
@@ -157,7 +177,7 @@ def _sql_job(topic, overrides=None):
     return [(device, _topic_for_device(topic, device)) + extra for device in devices]
 
 
-def __read_topics_sql(config, dep_config, topics, duration, remote, end, changes_only, overrides=None):
+def __read_topics_sql(config, dep_config, topics, duration, remote, end, changes_only, overrides=None, frames=False):
     """
     reader="sql": every input that would be read from Timescale over the DSN is
     read by one task over one connection; the rest goes through __read_topic as
@@ -189,7 +209,9 @@ def __read_topics_sql(config, dep_config, topics, duration, remote, end, changes
     sql_results = []
     if jobs:
         job_list = list(jobs.values())
-        if remote:
+        if frames:
+            sql_results = read_timescale_sql_frames(ts_conn, job_list, duration, end, changes_only)
+        elif remote:
             refs = get_timescale_sql_datasets_remote.options(num_returns=len(job_list)).remote(
                 ts_conn, job_list, duration, end, changes_only)
             # One return is one ref, not a list of one.
@@ -198,7 +220,7 @@ def __read_topics_sql(config, dep_config, topics, duration, remote, end, changes
             sql_results = get_timescale_sql_datasets_local(ts_conn, job_list, duration, end, changes_only)
     by_index = dict(zip(jobs.keys(), sql_results))
     return [by_index[i] if i in by_index
-            else __read_topic(config, dep_config, topic, duration, False, remote, end)
+            else __read_topic(config, dep_config, topic, duration, False, remote, end, frames)
             for i, topic in enumerate(topics)]
 
 
@@ -234,7 +256,7 @@ def read_input_window(start: datetime.datetime, end: datetime.datetime, role: st
     return result
 
 
-def __read_topic(config, dep_config, topic, duration, require_full_duration, remote, end):
+def __read_topic(config, dep_config, topic, duration, require_full_duration, remote, end, frames=False):
     """
     Route one input topic to its reader -- timescale-backed or kafka-backed,
     local or remote. Shared by __provide_historic_data and read_input_window so
@@ -245,11 +267,15 @@ def __read_topic(config, dep_config, topic, duration, require_full_duration, rem
     import_exports is read from the export the deployer named, because its
     Kafka topic keeps days where the export keeps everything. Without an entry
     it is read from Kafka, as it always was.
+
+    With frames=True (provide_historic_frames_local) a pandas frame comes back
+    instead of a dataset, read without Ray; a topic that would be read from
+    Kafka raises HistoryNeedsRayError.
     """
     if topic.filterType == "DeviceId":
         devices = _split_devices(topic.filterValue)
         if len(devices) > 1:
-            return __read_devices(config, dep_config, topic, devices, duration, require_full_duration, remote, end)
+            return __read_devices(config, dep_config, topic, devices, duration, require_full_duration, remote, end, frames)
         if len(devices) == 1 and devices[0] != topic.filterValue:
             # "a, " or " a": one device, written the way the flow engine joined it.
             topic = _topic_for_device(topic, devices[0])
@@ -268,10 +294,15 @@ def __read_topic(config, dep_config, topic, duration, require_full_duration, rem
                 reason = f"reading export {entry.export_id} (table {entry.table})"
         _log_import_source_once(topic, reason)
         if entry is not None:
-            return __read_export(config, dep_config, topic, entry, duration, require_full_duration, remote, end)
+            return __read_export(config, dep_config, topic, entry, duration, require_full_duration, remote, end, frames)
 
     if topic.name.startswith("urn_infai_ses_service") and not ALWAYS_PREFER_KAFKA:
-        return __read_timescale(config, dep_config, topic, duration, require_full_duration, remote, end)
+        return __read_timescale(config, dep_config, topic, duration, require_full_duration, remote, end, frames)
+
+    if frames:
+        raise HistoryNeedsRayError(
+            f"the history of input topic {topic.name} ({topic.filterValue}) is only in Kafka, "
+            f"which cannot be read without Ray: read it with provide_historic_data_local")
 
     f = get_kafka_dataset_local
     if remote:
@@ -319,7 +350,7 @@ def _union_device_datasets_remote(devices, *datasets) -> ray.data.Dataset:
     return _union_device_datasets_impl(devices, *datasets)
 
 
-def __read_devices(config, dep_config, topic, devices, duration, require_full_duration, remote, end):
+def __read_devices(config, dep_config, topic, devices, duration, require_full_duration, remote, end, frames=False):
     """
     Read a DeviceId topic with several devices as one dataset: each device goes
     through the ordinary dispatch as a topic of its own, and the rows of all of
@@ -328,8 +359,12 @@ def __read_devices(config, dep_config, topic, devices, duration, require_full_du
     end apply to every device alike.
     """
     parts = [__read_topic(config, dep_config, _topic_for_device(topic, device),
-                          duration, require_full_duration, remote, end)
+                          duration, require_full_duration, remote, end, frames)
              for device in devices]
+    if frames:
+        import pandas as pd
+        return pd.concat([part.assign(device_id=device) for device, part in zip(devices, parts)],
+                         ignore_index=True)
     if remote:
         return _union_device_datasets_remote.remote(devices, *parts)
     return _union_device_datasets_impl(devices, *parts)
@@ -352,7 +387,7 @@ def _resolve_ts_conn(config, dep_config):
     return dep_config.ts_conn or config.ts_conn
 
 
-def __read_export(config, dep_config, topic, entry, duration, require_full_duration, remote, end):
+def __read_export(config, dep_config, topic, entry, duration, require_full_duration, remote, end, frames=False):
     """
     Pick the read path for an import topic that has an export, with the same
     choice as __read_timescale and for the same reasons: the DSN wins where both
@@ -361,13 +396,17 @@ def __read_export(config, dep_config, topic, entry, duration, require_full_durat
     ts_conn = _resolve_ts_conn(config, dep_config)
     if ts_conn:
         f = get_export_dataset_local
-        if remote:
+        if frames:
+            f = read_export_frame
+        elif remote:
             f = get_export_dataset_remote.remote
         return f(ts_conn, topic, entry, duration, require_full_duration, end)
 
     if config.ts_wrapper_url and dep_config.senergy_token:
         f = get_ts_wrapper_export_dataset_local
-        if remote:
+        if frames:
+            f = read_export_history
+        elif remote:
             f = get_ts_wrapper_export_dataset_remote.remote
         return f(config.ts_wrapper_url, dep_config.senergy_token, topic, entry,
                  duration, require_full_duration, end)
@@ -380,7 +419,7 @@ def __read_export(config, dep_config, topic, entry, duration, require_full_durat
         f"the environment, which is what an operator development environment gives a run")
 
 
-def __read_timescale(config, dep_config, topic, duration, require_full_duration, remote, end):
+def __read_timescale(config, dep_config, topic, duration, require_full_duration, remote, end, frames=False):
     """
     Pick the read path for a timescale-backed topic.
 
@@ -397,13 +436,17 @@ def __read_timescale(config, dep_config, topic, duration, require_full_duration,
     ts_conn = _resolve_ts_conn(config, dep_config)
     if ts_conn:
         f = get_timescale_dataset_local
-        if remote:
+        if frames:
+            f = read_timescale_frame
+        elif remote:
             f = get_timescale_dataset_remote.remote
         return f(ts_conn, topic, duration, require_full_duration, end)
 
     if config.ts_wrapper_url and dep_config.senergy_token:
         f = get_ts_wrapper_dataset_local
-        if remote:
+        if frames:
+            f = read_history
+        elif remote:
             f = get_ts_wrapper_dataset_remote.remote
         return f(config.ts_wrapper_url, dep_config.senergy_token, topic,
                  duration, require_full_duration, end)
