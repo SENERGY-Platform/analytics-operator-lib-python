@@ -1,11 +1,91 @@
 import json
 import ray
+import uuid
+import confluent_kafka
 import datetime
 from operator_lib.util.model import InputTopic
 import time
 import typing
 from ray.data.expressions import col, udf, DataType
 import pyarrow as pa
+
+
+def read_recent_messages(bootstrap: str, topic: str, count: int, extract: typing.Callable[[typing.Any], typing.Any] = lambda message: message, timeout_s: float = 60.0) -> typing.List[typing.Any]:
+    """
+    `extract` of each of the last `count` messages of every partition of the topic, JSON-decoded,
+    read in the calling process: from the end offset minus `count` up to the end offset as it was
+    when the read began. Only what `extract` returns is kept, and an equal result once. A message
+    that is not JSON, or whose result is None, is skipped.
+    """
+    consumer = confluent_kafka.Consumer({
+        "bootstrap.servers": bootstrap,
+        "group.id": f"operator-lib-places-{uuid.uuid4()}",
+        "enable.auto.commit": False,
+        "auto.offset.reset": "earliest",
+    })
+    try:
+        metadata = consumer.list_topics(topic, timeout=30).topics.get(topic)
+        if metadata is None or metadata.error is not None:
+            raise RuntimeError(f"kafka topic {topic} is not available to read its recent messages")
+        ends = {}
+        assignment = []
+        for partition in metadata.partitions:
+            low, high = consumer.get_watermark_offsets(
+                confluent_kafka.TopicPartition(topic, partition), timeout=30)
+            if high > low:
+                ends[partition] = high
+                assignment.append(confluent_kafka.TopicPartition(topic, partition, max(low, high - count)))
+        consumer.assign(assignment)
+        messages = {}
+        deadline = time.monotonic() + timeout_s
+        while ends and time.monotonic() < deadline:
+            message = consumer.poll(1.0)
+            if message is None or message.error():
+                continue
+            if message.offset() < ends.get(message.partition(), 0):
+                try:
+                    extracted = extract(json.loads(message.value()))
+                except ValueError:
+                    extracted = None
+                if extracted is not None:
+                    messages[extracted] = None
+            if message.offset() >= ends.get(message.partition(), 0) - 1:
+                ends.pop(message.partition(), None)
+        if ends:
+            raise TimeoutError(
+                f"reading the recent messages of {topic} did not reach the end of partitions "
+                f"{sorted(ends)} within {timeout_s} s")
+        return list(messages)
+    finally:
+        consumer.close()
+
+
+def value_filter_expression(value_filter):
+    """The ray expression that keeps the rows whose message carries the filter's value at its path."""
+    return json_get_path(col("value"), value_filter.path) == value_filter.value
+
+
+# A UDF of its own and self-contained: the expression is pickled by value to the workers, and
+# json_get, which every unfiltered read uses, must stay exactly what an older worker knows.
+@udf(return_dtype=DataType.string())
+def json_get_path(value_col, path: str):
+    """Like json_get, but `path` is a dotted path into nested objects; null where it does not lead to a value."""
+    import json
+
+    results = []
+    for val in value_col:
+        try:
+            raw = None if val is None else val.as_py()
+            if raw is None:
+                results.append(None)
+                continue
+            found = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+            for segment in path.split("."):
+                found = found.get(segment) if isinstance(found, dict) else None
+            results.append(None if found is None else str(found))
+        except (json.JSONDecodeError, AttributeError, TypeError):
+            results.append(None)
+    return pa.array(results, type=pa.string())
 
 
 @udf(return_dtype=DataType.string())
@@ -45,10 +125,17 @@ def json_get(value_col, key: str):
 def get_kafka_dataset_remote(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> ray.data.Dataset:
     return __get_kafka_dataset(bootstrap, input_topic, pipeline_id, duration, require_full_duration, end)
 
-def get_kafka_dataset_local(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> ray.data.Dataset:
-    return __get_kafka_dataset(bootstrap, input_topic, pipeline_id, duration, require_full_duration, end)
 
-def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> ray.data.Dataset:
+# Separate from get_kafka_dataset_remote on purpose: a Ray worker may run an older
+# library, and the unfiltered task must keep the body and signature it was pickled with.
+@ray.remote
+def get_kafka_dataset_filtered_remote(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool, end: typing.Optional[datetime.datetime], value_filter) -> ray.data.Dataset:
+    return __get_kafka_dataset(bootstrap, input_topic, pipeline_id, duration, require_full_duration, end, value_filter)
+
+def get_kafka_dataset_local(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None, value_filter=None) -> ray.data.Dataset:
+    return __get_kafka_dataset(bootstrap, input_topic, pipeline_id, duration, require_full_duration, end, value_filter)
+
+def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None, value_filter=None) -> ray.data.Dataset:
     # Pre-existing bug fixed here: this function and __read_kafka_window below
     # used to share the one name __get_kafka_dataset. The second definition
     # replaced the first at import time, so this outer function -- the one
@@ -63,7 +150,7 @@ def __get_kafka_dataset(bootstrap: str, input_topic: InputTopic, pipeline_id: st
             if not m.source.startswith("analytics."):
                 m.source = f"analytics.{m.source}"
     while True:
-        ds, cutoff = __read_kafka_window(bootstrap, input_topic, pipeline_id, duration, end)
+        ds, cutoff = __read_kafka_window(bootstrap, input_topic, pipeline_id, duration, end, value_filter)
         if require_full_duration:
             if end is not None:
                 # A fixed end cannot be waited past: probe once and refuse
@@ -159,7 +246,7 @@ def __extract_json_path(payload: typing.Any, path: str) -> typing.Any:
     return current
 
 
-def __read_kafka_window(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, end: typing.Optional[datetime.datetime] = None) -> typing.Tuple[ray.data.Dataset, datetime.datetime]:
+def __read_kafka_window(bootstrap: str, input_topic: InputTopic, pipeline_id: str, duration: datetime.timedelta, end: typing.Optional[datetime.datetime] = None, value_filter=None) -> typing.Tuple[ray.data.Dataset, datetime.datetime]:
     if duration > datetime.timedelta(days=365):
         raise ValueError("Duration too long, refusing to read from Kafka. Please use a more reasonable duration.")
 
@@ -175,6 +262,9 @@ def __read_kafka_window(bootstrap: str, input_topic: InputTopic, pipeline_id: st
     expressions = []
     for f in filter:
         expressions.append((json_get(col("value"), f["key"]) == f["value"]))
+
+    if value_filter is not None:
+        expressions.append(value_filter_expression(value_filter))
 
     if end is not None:
         # A fixed bound: start_offset only seeks the lower edge, so the

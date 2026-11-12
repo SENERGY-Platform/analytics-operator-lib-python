@@ -5,6 +5,7 @@ import copy
 import dataclasses
 import datetime
 import typing
+from operator_lib.util.config import MissingConfigValueError
 from operator_lib.util.model import InputTopic
 from operator_lib.util.helpers.exports import ImportExport, export_column_pairs
 import base64
@@ -215,14 +216,14 @@ def __window_clause(duration: datetime.timedelta, end: typing.Optional[datetime.
         return f"time >= NOW() - INTERVAL '{int(duration.total_seconds())}s'"
 
 
-def __guard_full_duration(conn_str: str, conf: InputTopic, query: str, duration: datetime.timedelta, require_full_duration: bool, end: typing.Optional[datetime.datetime]):
+def __guard_full_duration(conn_str: str, conf: InputTopic, query: str, duration: datetime.timedelta, require_full_duration: bool, end: typing.Optional[datetime.datetime], params: typing.Optional[tuple] = None):
     if require_full_duration:
         if end is not None:
             # A fixed end cannot be waited past: probe once and refuse instead
             # of sleeping towards a window that will never arrive.
             conn = __create_timescale_connection(conn_str)
             cursor = conn.cursor()
-            cursor.execute(query + " LIMIT 1")
+            cursor.execute(query + " LIMIT 1", params)
             result = cursor.fetchone()
             cursor.close()
             if result is None:
@@ -242,7 +243,7 @@ def __guard_full_duration(conn_str: str, conf: InputTopic, query: str, duration:
             conn = __create_timescale_connection(conn_str)
             while not enough_data:
                 cursor = conn.cursor()
-                cursor.execute(query + " LIMIT 1")
+                cursor.execute(query + " LIMIT 1", params)
                 result = cursor.fetchone()
                 cursor.close()
                 if result is not None:
@@ -263,20 +264,29 @@ def get_export_dataset_remote(conn_str: str, conf: InputTopic, entry: ImportExpo
     return ds
 
 
-def get_export_dataset_local(conn_str: str, conf: InputTopic, entry: ImportExport, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> ray.data.Dataset:
-    return ray.data.from_pandas(read_export_frame(conn_str, conf, entry, duration, require_full_duration, end))
+# Separate from get_export_dataset_remote on purpose: a Ray worker may run an older
+# library, and the unfiltered task must keep the body and signature it was pickled with.
+@ray.remote
+def get_export_dataset_filtered_remote(conn_str: str, conf: InputTopic, entry: ImportExport, duration: datetime.timedelta, require_full_duration: bool, end: typing.Optional[datetime.datetime], value_filter) -> ray.data.Dataset:
+    query = __get_export_dataset_query(conn_str, conf, entry, duration, require_full_duration, end, value_filter)
+    ds = ray.data.read_sql(query, lambda: __create_timescale_connection(conn_str), sql_params=__export_query_params(value_filter), shard_keys=["time"], shard_hash_fn="timestamptz_to_millis", concurrency=4)
+    return ds
 
 
-def read_export_frame(conn_str: str, conf: InputTopic, entry: ImportExport, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> "pandas.DataFrame":
+def get_export_dataset_local(conn_str: str, conf: InputTopic, entry: ImportExport, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None, value_filter=None) -> ray.data.Dataset:
+    return ray.data.from_pandas(read_export_frame(conn_str, conf, entry, duration, require_full_duration, end, value_filter))
+
+
+def read_export_frame(conn_str: str, conf: InputTopic, entry: ImportExport, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None, value_filter=None) -> "pandas.DataFrame":
     """
     get_export_dataset_local without Ray: the same rows as a pandas frame, read
     in the calling process.
     """
-    query = __get_export_dataset_query(conn_str, conf, entry, duration, require_full_duration, end)
+    query = __get_export_dataset_query(conn_str, conf, entry, duration, require_full_duration, end, value_filter)
     conn = __create_timescale_connection(conn_str)
     import pandas as pd
     import pandas.io.sql as sqlio
-    data = sqlio.read_sql_query(query, conn)
+    data = sqlio.read_sql_query(query, conn, params=__export_query_params(value_filter))
 
     for col in data.columns:
         if pd.api.types.is_datetime64tz_dtype(data[col].dtype):
@@ -285,14 +295,26 @@ def read_export_frame(conn_str: str, conf: InputTopic, entry: ImportExport, dura
     return data
 
 
-def __get_export_dataset_query(conn_str: str, conf: InputTopic, entry: ImportExport, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None) -> str:
+def __export_query_params(value_filter) -> typing.Optional[tuple]:
+    return None if value_filter is None else (value_filter.value,)
+
+
+def __get_export_dataset_query(conn_str: str, conf: InputTopic, entry: ImportExport, duration: datetime.timedelta, require_full_duration: bool = False, end: typing.Optional[datetime.datetime] = None, value_filter=None) -> str:
+    # With a filter the query carries a bound parameter, so a literal % in any
+    # interpolated name has to be doubled; without one the query is sent as is.
+    esc = (lambda text: text.replace("%", "%%")) if value_filter is not None else (lambda text: text)
     # The table is the one the deployer named, not derived: an export table's
     # name embeds the owner's database id, which is not in the input topic.
-    table_name = __quote_identifier(entry.table)
+    table_name = esc(__quote_identifier(entry.table))
     columns = [
-        f"{__quote_identifier(column)} AS {__quote_identifier(dest)}"
+        esc(f"{__quote_identifier(column)} AS {__quote_identifier(dest)}")
         for column, dest in export_column_pairs(entry, conf)
     ]
+    # The wanted value is the bound parameter %s, passed by the caller from
+    # __export_query_params; the column is the one the operator declared.
+    place = ""
+    if value_filter is not None:
+        place = f"AND {esc(__quote_identifier(value_filter.column))} = %s"
 
     # DISTINCT over every selected column, not over time. An export does not set
     # TimestampUnique, so it can hold the same row more than once, and the
@@ -306,10 +328,50 @@ def __get_export_dataset_query(conn_str: str, conf: InputTopic, entry: ImportExp
             {table_name}
         WHERE
             {__window_clause(duration, end)}
+            {place}
         ORDER BY time ASC
     """
-    __guard_full_duration(conn_str, conf, query, duration, require_full_duration, end)
+    __guard_full_duration(conn_str, conf, query, duration, require_full_duration, end, __export_query_params(value_filter))
     return query
+
+
+def check_export_columns(conn_str: str, entry: ImportExport, columns: typing.List[str]):
+    """Raises MissingConfigValueError naming the columns the export's table lacks."""
+    conn = __create_timescale_connection(conn_str)
+    try:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(f"SELECT * FROM {__quote_identifier(entry.table)} LIMIT 0")
+            present = {d[0] for d in cursor.description}
+        finally:
+            cursor.close()
+    finally:
+        conn.close()
+    missing = [c for c in columns if c not in present]
+    if missing:
+        raise MissingConfigValueError(
+            f"export {entry.export_id} (table {entry.table}) has no column "
+            f"{', '.join(repr(c) for c in missing)}, which the import filter names")
+
+
+def read_export_places(conn_str: str, entry: ImportExport, columns: typing.List[str], window_days: int) -> typing.List[tuple]:
+    """
+    The distinct rows of these columns of places that reported in the last `window_days`;
+    the window keeps a decommissioned place from winning, and keeps this from scanning the export.
+    """
+    quoted = ", ".join(__quote_identifier(c) for c in columns)
+    query = (f"SELECT DISTINCT {quoted} FROM {__quote_identifier(entry.table)} "
+             f"WHERE time > NOW() - INTERVAL '{int(window_days)} days'")
+    conn = __create_timescale_connection(conn_str)
+    try:
+        cursor = conn.cursor()
+        try:
+            cursor.execute(query)
+            return cursor.fetchall()
+        finally:
+            cursor.close()
+    finally:
+        conn.close()
 
 
 def __quote_identifier(value: str) -> str:

@@ -14,8 +14,9 @@
    limitations under the License.
 """
 
-__all__ = ("Inputs", "Outputs", "DeclarationError")
+__all__ = ("Inputs", "Outputs", "ImportFilter", "DeclarationError")
 
+import dataclasses
 import inspect
 import typing
 
@@ -66,6 +67,51 @@ class _Declaration:
     @classmethod
     def fields(cls) -> typing.List[typing.Tuple[str, str]]:
         return [(name, _type_name(cls.__name__, name, a)) for name, a in _annotations(cls._classes()).items()]
+
+
+@dataclasses.dataclass(frozen=True)
+class ImportFilter:
+    """
+    Narrows import inputs to the messages of one place: a shared import carries many
+    locations in one topic. Declared on the operator as `import_filter` (one filter) or
+    `import_filters` (a list).
+
+    path: dotted path of the identifying value in the raw import message, e.g. "value.meta.id".
+    column: the export column that holds it, for the history, e.g. "station_id". The deployer's
+        `import_exports` lists only the columns of mapped inputs, so the name is given here.
+    value: config field holding the wanted value; may be empty.
+    near, near_paths, near_columns: config fields with a latitude and a longitude, and the
+        message paths and export columns of the two; the nearest place is chosen when `value`
+        is empty.
+    inputs: the declared inputs (mapping dests) whose import topics the filter applies to;
+        required when the operator reads more than one import, empty means the only import.
+    places_scan_messages: for an import without an export, how many of the last messages
+        per partition of the topic are read to find the nearest place.
+    """
+    path: str
+    column: str
+    value: typing.Optional[str] = None
+    near: typing.Tuple[str, ...] = ()
+    near_paths: typing.Tuple[str, ...] = ()
+    near_columns: typing.Tuple[str, ...] = ()
+    inputs: typing.Tuple[str, ...] = ()
+    places_scan_messages: int = 20000
+
+    def __post_init__(self):
+        # Accept lists, keep the instance hashable.
+        for name in ("near", "near_paths", "near_columns", "inputs"):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        for name in ("path", "column"):
+            if not getattr(self, name) or not isinstance(getattr(self, name), str):
+                raise DeclarationError(f"ImportFilter: {name} must be a non-empty string")
+        if self.near or self.near_paths or self.near_columns:
+            if not (len(self.near) == len(self.near_paths) == len(self.near_columns) == 2):
+                raise DeclarationError(
+                    "ImportFilter: near, near_paths and near_columns each take two entries, latitude then longitude")
+        if not isinstance(self.places_scan_messages, int) or self.places_scan_messages < 1:
+            raise DeclarationError("ImportFilter: places_scan_messages must be a positive integer")
+        if not self.value and not self.near:
+            raise DeclarationError("ImportFilter: set value, near, or both, otherwise there is nothing to resolve")
 
 
 class Inputs(_Declaration):

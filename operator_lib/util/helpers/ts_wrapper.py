@@ -48,6 +48,7 @@ import typing
 import ray
 import requests
 
+from operator_lib.util.config import MissingConfigValueError
 from operator_lib.util.model import InputTopic
 from operator_lib.util.helpers.exports import ImportExport, export_column_pairs
 from operator_lib.util.logger import logger
@@ -141,9 +142,10 @@ def get_ts_wrapper_export_dataset_local(
     duration: datetime.timedelta,
     require_full_duration: bool = False,
     end: typing.Optional[datetime.datetime] = None,
+    value_filter=None,
 ) -> ray.data.Dataset:
     frame = read_export_history(
-        wrapper_url, token, conf, entry, duration, require_full_duration, end)
+        wrapper_url, token, conf, entry, duration, require_full_duration, end, value_filter)
     return ray.data.from_pandas(frame)
 
 
@@ -159,6 +161,23 @@ def get_ts_wrapper_export_dataset_remote(
 ) -> ray.data.Dataset:
     return get_ts_wrapper_export_dataset_local(
         wrapper_url, token, conf, entry, duration, require_full_duration, end)
+
+
+# Separate from get_ts_wrapper_export_dataset_remote on purpose: a Ray worker may run an
+# older library, and the unfiltered task must keep the body and signature it was pickled with.
+@ray.remote
+def get_ts_wrapper_export_dataset_filtered_remote(
+    wrapper_url: str,
+    token: str,
+    conf: InputTopic,
+    entry: ImportExport,
+    duration: datetime.timedelta,
+    require_full_duration: bool,
+    end: typing.Optional[datetime.datetime],
+    value_filter,
+) -> ray.data.Dataset:
+    return get_ts_wrapper_export_dataset_local(
+        wrapper_url, token, conf, entry, duration, require_full_duration, end, value_filter)
 
 
 def read_history(
@@ -189,6 +208,7 @@ def read_export_history(
     duration: datetime.timedelta,
     require_full_duration: bool = False,
     end: typing.Optional[datetime.datetime] = None,
+    value_filter=None,
 ):
     """
     `read_history` for an input topic whose history the deployer resolved to an
@@ -197,7 +217,63 @@ def read_export_history(
     rows are kept as the export holds them. See `_decode_export` for why that
     differs from the device decoding.
     """
-    return _read(wrapper_url, token, conf, entry, duration, require_full_duration, end)
+    return _read(wrapper_url, token, conf, entry, duration, require_full_duration, end, value_filter)
+
+
+def _places_element(entry: ImportExport, columns: typing.List[str], start, end) -> typing.Dict[str, typing.Any]:
+    return {
+        "exportId": entry.export_id,
+        "columns": [{"name": c} for c in columns],
+        "time": {"start": _format_time(start), "end": _format_time(end)},
+        "orderColumnIndex": 0,
+        "orderDirection": "asc",
+    }
+
+
+def check_export_columns(wrapper_url: str, token: str, entry: ImportExport, columns: typing.List[str]):
+    """Probes the export for these columns; raises MissingConfigValueError if the wrapper refuses them."""
+    end = datetime.datetime.now(datetime.timezone.utc)
+    element = _places_element(entry, columns, end - datetime.timedelta(hours=1), end)
+    element["limit"] = 1
+    try:
+        _post(wrapper_url, token, [element], path=_EXPORT_PATH, params=_EXPORT_PARAMS)
+    except (TimescaleWrapperError, _OversizedResponse) as err:
+        raise MissingConfigValueError(
+            f"timescale-wrapper could not read the columns {', '.join(repr(c) for c in columns)} "
+            f"of export {entry.export_id}, which the import filter names: {err}") from None
+
+
+def read_export_places(
+    wrapper_url: str,
+    token: str,
+    entry: ImportExport,
+    columns: typing.List[str],
+    window_days: int,
+) -> typing.List[tuple]:
+    """
+    The distinct rows of these columns over the last `window_days`, the same set the
+    direct path lists. /queries has no DISTINCT, so the window is read in chunks that
+    are halved when the gateway refuses one, and deduplicated here.
+    """
+    end = datetime.datetime.now(datetime.timezone.utc)
+    pending = [(end - datetime.timedelta(days=window_days), end)]
+    places = set()
+    while pending:
+        start, stop = pending.pop()
+        try:
+            payload = _post(wrapper_url, token, [_places_element(entry, columns, start, stop)],
+                            path=_EXPORT_PATH, params=_EXPORT_PARAMS)
+        except _OversizedResponse:
+            half = (stop - start) / 2
+            if half < MIN_CHUNK:
+                raise TimescaleWrapperError(
+                    f"timescale-wrapper kept refusing to list the places of export {entry.export_id}")
+            pending += [(start, start + half), (start + half, stop)]
+            continue
+        for row in (payload[0] if payload else None) or []:
+            if row and row[0] is not None and len(row) == len(columns) + 1:
+                places.add(tuple(row[1:]))
+    return sorted(places, key=repr)
 
 
 def _read(
@@ -208,14 +284,15 @@ def _read(
     duration: datetime.timedelta,
     require_full_duration: bool,
     end: typing.Optional[datetime.datetime],
+    value_filter=None,
 ):
     import pandas as pd
 
     if require_full_duration:
         if end is not None:
-            _require_reach(wrapper_url, token, conf, duration, end, entry)
+            _require_reach(wrapper_url, token, conf, duration, end, entry, value_filter)
         else:
-            _await_full_duration(wrapper_url, token, conf, duration, entry)
+            _await_full_duration(wrapper_url, token, conf, duration, entry, value_filter)
 
     end = end if end is not None else datetime.datetime.now(datetime.timezone.utc)
     start = end - duration
@@ -226,7 +303,7 @@ def _read(
     while window_start < end:
         window_end = min(window_start + chunk, end)
         rows, chunk = _read_window(
-            wrapper_url, token, conf, window_start, window_end, chunk, entry)
+            wrapper_url, token, conf, window_start, window_end, chunk, entry, value_filter)
         if rows is not None and not rows.empty:
             frames.append(rows)
         # chunk may have been halved by a refusal, in which case the window that
@@ -269,6 +346,7 @@ def _read_window(
     window_end: datetime.datetime,
     chunk: datetime.timedelta,
     entry: typing.Optional[ImportExport] = None,
+    value_filter=None,
 ):
     """
     Read one time window. Returns (frame, chunk); frame is None when the window
@@ -283,7 +361,7 @@ def _read_window(
     wrapper's time resolution -- earlier, and the window's own lower edge is
     applied here.
     """
-    element = _build_element(conf, window_start - _TIME_RESOLUTION, window_end, entry)
+    element = _build_element(conf, window_start - _TIME_RESOLUTION, window_end, entry, value_filter)
     try:
         frame = _query(wrapper_url, token, conf, element, entry)
     except _OversizedResponse:
@@ -331,11 +409,12 @@ def _build_element(
     window_start: datetime.datetime,
     window_end: datetime.datetime,
     entry: typing.Optional[ImportExport] = None,
+    value_filter=None,
 ) -> typing.Dict[str, typing.Any]:
     if entry is not None:
         # Column names are the export's own, looked up per mapping; the time
         # column is implicit as the first column of every row.
-        return {
+        element = {
             "exportId": entry.export_id,
             "columns": [{"name": column} for column, _ in export_column_pairs(entry, conf)],
             "time": {
@@ -345,6 +424,10 @@ def _build_element(
             "orderColumnIndex": 0,
             "orderDirection": "asc",
         }
+        if value_filter is not None:
+            # timescale-wrapper's QueriesRequestElementFilter; it renders the value as a quoted literal.
+            element["filters"] = [{"column": value_filter.column, "type": "=", "value": value_filter.value}]
+        return element
     return {
         "deviceId": conf.filterValue,
         # The topic carries the service id with colons replaced by underscores,
@@ -520,6 +603,7 @@ def _await_full_duration(
     conf: InputTopic,
     duration: datetime.timedelta,
     entry: typing.Optional[ImportExport] = None,
+    value_filter=None,
 ):
     """
     Wait until the series reaches back at least `duration`, matching what the
@@ -527,7 +611,7 @@ def _await_full_duration(
     """
     while True:
         end = datetime.datetime.now(datetime.timezone.utc)
-        element = _build_element(conf, end - duration, end, entry)
+        element = _build_element(conf, end - duration, end, entry, value_filter)
         element["limit"] = 1
         element["orderDirection"] = "asc"
         try:
@@ -559,6 +643,7 @@ def _require_reach(
     duration: datetime.timedelta,
     end: datetime.datetime,
     entry: typing.Optional[ImportExport] = None,
+    value_filter=None,
 ):
     """
     Single-shot counterpart of `_await_full_duration` for a fixed `end`: a bound
@@ -566,7 +651,7 @@ def _require_reach(
     ascending from `end - duration`, and raises ValueError rather than sleeping
     towards a window that will never arrive.
     """
-    element = _build_element(conf, end - duration, end, entry)
+    element = _build_element(conf, end - duration, end, entry, value_filter)
     element["limit"] = 1
     element["orderDirection"] = "asc"
     try:

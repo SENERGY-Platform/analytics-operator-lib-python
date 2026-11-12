@@ -7,11 +7,12 @@ from operator_lib.util import clock
 from operator_lib.util.model import InputTopic
 from operator_lib.util.helpers.timescale import get_timescale_dataset_local, get_timescale_dataset_remote, read_timescale_frame
 from operator_lib.util.helpers.timescale import get_timescale_sql_datasets_local, get_timescale_sql_datasets_remote, read_timescale_sql_frames, SqlOverride
-from operator_lib.util.helpers.timescale import get_export_dataset_local, get_export_dataset_remote, read_export_frame
-from operator_lib.util.helpers.kafka import get_kafka_dataset_local, get_kafka_dataset_remote
+from operator_lib.util.helpers.timescale import get_export_dataset_local, get_export_dataset_remote, get_export_dataset_filtered_remote, read_export_frame
+from operator_lib.util.helpers.kafka import get_kafka_dataset_local, get_kafka_dataset_remote, get_kafka_dataset_filtered_remote
 from operator_lib.util.helpers.ts_wrapper import get_ts_wrapper_dataset_local, get_ts_wrapper_dataset_remote, read_history
-from operator_lib.util.helpers.ts_wrapper import get_ts_wrapper_export_dataset_local, get_ts_wrapper_export_dataset_remote, read_export_history
+from operator_lib.util.helpers.ts_wrapper import get_ts_wrapper_export_dataset_local, get_ts_wrapper_export_dataset_remote, get_ts_wrapper_export_dataset_filtered_remote, read_export_history
 from operator_lib.util.helpers.exports import find_import_export
+from operator_lib.util.helpers import import_filter
 from operator_lib.util.config import MissingConfigValueError
 from operator_lib.util.logger import logger
 
@@ -280,6 +281,12 @@ def __read_topic(config, dep_config, topic, duration, require_full_duration, rem
             # "a, " or " a": one device, written the way the flow engine joined it.
             topic = _topic_for_device(topic, devices[0])
 
+    # Only set when the operator declared an import filter that applies to this input.
+    # A filtered read goes through its own remote tasks, so the unfiltered ones stay
+    # as an older Ray worker knows them.
+    value_filter = import_filter.filter_for(topic)
+    extra = (value_filter,) if value_filter is not None else ()
+
     if topic.filterType == "ImportId":
         entry = None
         if ALWAYS_PREFER_KAFKA:
@@ -294,7 +301,7 @@ def __read_topic(config, dep_config, topic, duration, require_full_duration, rem
                 reason = f"reading export {entry.export_id} (table {entry.table})"
         _log_import_source_once(topic, reason)
         if entry is not None:
-            return __read_export(config, dep_config, topic, entry, duration, require_full_duration, remote, end, frames)
+            return __read_export(config, dep_config, topic, entry, duration, require_full_duration, remote, end, frames, extra)
 
     if topic.name.startswith("urn_infai_ses_service") and not ALWAYS_PREFER_KAFKA:
         return __read_timescale(config, dep_config, topic, duration, require_full_duration, remote, end, frames)
@@ -306,9 +313,9 @@ def __read_topic(config, dep_config, topic, duration, require_full_duration, rem
 
     f = get_kafka_dataset_local
     if remote:
-        f = get_kafka_dataset_remote.remote
+        f = (get_kafka_dataset_filtered_remote if extra else get_kafka_dataset_remote).remote
     return f(dep_config.config_bootstrap_servers,
-        topic, dep_config.pipeline_id, duration, require_full_duration, end)
+        topic, dep_config.pipeline_id, duration, require_full_duration, end, *extra)
 
 
 def _split_devices(filter_value):
@@ -387,7 +394,7 @@ def _resolve_ts_conn(config, dep_config):
     return dep_config.ts_conn or config.ts_conn
 
 
-def __read_export(config, dep_config, topic, entry, duration, require_full_duration, remote, end, frames=False):
+def __read_export(config, dep_config, topic, entry, duration, require_full_duration, remote, end, frames=False, extra=()):
     """
     Pick the read path for an import topic that has an export, with the same
     choice as __read_timescale and for the same reasons: the DSN wins where both
@@ -399,17 +406,17 @@ def __read_export(config, dep_config, topic, entry, duration, require_full_durat
         if frames:
             f = read_export_frame
         elif remote:
-            f = get_export_dataset_remote.remote
-        return f(ts_conn, topic, entry, duration, require_full_duration, end)
+            f = (get_export_dataset_filtered_remote if extra else get_export_dataset_remote).remote
+        return f(ts_conn, topic, entry, duration, require_full_duration, end, *extra)
 
     if config.ts_wrapper_url and dep_config.senergy_token:
         f = get_ts_wrapper_export_dataset_local
         if frames:
             f = read_export_history
         elif remote:
-            f = get_ts_wrapper_export_dataset_remote.remote
+            f = (get_ts_wrapper_export_dataset_filtered_remote if extra else get_ts_wrapper_export_dataset_remote).remote
         return f(config.ts_wrapper_url, dep_config.senergy_token, topic, entry,
-                 duration, require_full_duration, end)
+                 duration, require_full_duration, end, *extra)
 
     raise MissingConfigValueError(
         f"cannot read history for topic {topic.name} from export {entry.export_id}: "

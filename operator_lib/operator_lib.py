@@ -67,6 +67,7 @@ class OperatorLib:
         typed_config = operator.configType({})
         if "config" in config_json:
             typed_config = operator.configType(config_json['config'])
+        operator.set_topics(opr_config.inputTopics, opr_config.trainingTopics)
         operator.init(
             kafka_consumer=kafka_consumer,
             kafka_producer=kafka_producer,

@@ -52,6 +52,58 @@ The CI of an operator repository commits the manifest before tagging a version, 
 
 An input assigned several devices (comma-separated in its `filterValue`) is still one dataset in `provide_historic_data`, `provide_historic_data_local` and `read_input_window` (one frame in `provide_historic_frames_local`): the rows of every device, with an added column `device_id` naming the device. An input with one device has no such column.
 
+## Filtering a shared import by location
+
+A shared import (all DWD stations in one topic, for example) delivers every place to every operator. An operator for one place declares an `ImportFilter`; the library then passes only that place's messages to `run()`, and reads only its rows from the history.
+
+```python
+from operator_lib.util import Config, ImportFilter, MLOperator
+
+class CustomConfig(Config):
+    station_id = ""
+    lat = ""
+    long = ""
+
+class Operator(MLOperator):
+    configType = CustomConfig
+    import_filter = ImportFilter(
+        path="value.meta.id",              # dotted path in the raw import message (live)
+        column="station_id",               # the export column that holds it (history)
+        value="station_id",                # config field holding the wanted value; may be empty
+        near=("lat", "long"),              # config fields with a location, used when value is empty
+        near_paths=("value.meta.lat", "value.meta.long"),
+        near_columns=("lat", "lon"),       # the export columns of the two
+    )
+```
+
+The export columns are named in the declaration because `import_exports` lists only the columns of the mapped inputs. The export itself (table, export id) still comes from the `import_exports` entry of the import.
+
+The value is found once at start, before the first training:
+
+1. The config field named by `value` is set: that value.
+2. Otherwise, with the `near` fields set: the nearest place (great-circle distance) among the distinct `column`, `near_columns` rows of the export that have data in the last seven days, so a decommissioned place cannot win. The value and its distance are logged at info level. The same seven days apply over a database connection and over timescale-wrapper.
+3. Neither: no filtering, one warning, and no check of the export.
+
+An import has an `import_exports` entry only if an export carries every mapped path of the topic as a column; an import with list values (a forecast) never has one. Without an entry the filter still works: live as always, in the history through Kafka, and with `value` unset the nearest place is taken from the last `places_scan_messages` messages (default 20000, per partition, counted back from the end offset) of the input's topic: identifier and location are read from the messages at `path` and `near_paths`. If none of them carries the paths, the operator stops at start.
+
+If an entry exists, the operator stops at start with a message naming the export and the column when the export's table lacks one of the declared columns (checked against the table over a database connection, against the answer of timescale-wrapper otherwise). A filter that was asked for never falls back to the unfiltered import. A `value` or `near` field that the config type does not declare is a `DeclarationError` at start. The comparison is on strings, so `02932` and `2932` differ. A message without the path is dropped.
+
+An operator with several imports declares `import_filters` instead, each filter bound to inputs by name; the `near` fields may be shared:
+
+```python
+    import_filters = [
+        ImportFilter(inputs=["outdoor_temperature"], path="value.meta.id", column="station_id", value="measure_station",
+                     near=("lat", "long"), near_paths=("value.meta.lat", "value.meta.long"), near_columns=("lat", "lon")),
+        ImportFilter(inputs=["forecast_temperature", "forecasted_for"], path="value.meta.id", column="station_id",
+                     value="forecast_station",
+                     near=("lat", "long"), near_paths=("value.meta.lat", "value.meta.long"), near_columns=("lat", "lon")),
+    ]
+```
+
+`operator.resolved_import_filters()` returns, once `init()` has run, one entry per declared filter in declaration order: `value`, `found` (`"config"`, `"near"`, or `"none"` when nothing was set and the import is not filtered), `inputs`, `path`, and for `near` the `distance_km` and the station's `latitude` and `longitude`.
+
+A filter applies to the import topics that one of its `inputs` is mapped to. `inputs` is required as soon as the operator reads more than one import: a filter without it is rejected at start rather than applied to every import. One import input can have only one filter. Device and operator inputs are never filtered. The history is filtered the same way in every reader that serves an import (database connection, timescale-wrapper, Kafka); `reader="sql"` does not read imports. A filtered history read runs in its own Ray tasks, which a Ray worker with an older library does not have; the unfiltered tasks are unchanged.
+
 ## Reading history without Ray: `provide_historic_frames_local`
 
 `provide_historic_data_local` returns Ray datasets. Without a connection to a cluster, its first call starts a local Ray instance, which took about 2 GB of memory in our measurements and stays for the life of the process. An `MLOperator` runs `infer()` in exactly that state, after training has disconnected. While connected through Ray Client, as during the evaluation replay, the read fails.

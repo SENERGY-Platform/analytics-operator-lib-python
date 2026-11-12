@@ -17,8 +17,10 @@
 __all__ = ("OperatorBase",)
 
 from .logger import logger
-from .model import Config, Selector
-from .declaration import Outputs, is_declaration
+from .model import Config, InputTopic, Selector
+from .declaration import ImportFilter, Outputs, is_declaration
+from .helpers import import_filter
+from .helpers.import_filter import ResolvedImportFilter
 from . import clock
 import confluent_kafka
 import mf_lib
@@ -55,6 +57,14 @@ class OperatorBase:
     # generator; at runtime only the output names are checked, by a warning.
     inputs: typing.Optional[typing.Type] = None
     outputs: typing.Optional[typing.Type[Outputs]] = None
+    # Optional: narrow shared import inputs to one place, live and in the history.
+    # One filter for every import input, or a list of filters bound to inputs by name.
+    import_filter: typing.Optional[ImportFilter] = None
+    import_filters: typing.Sequence[ImportFilter] = ()
+    # Set by OperatorLib before init(); the filters resolve against them. Not an init()
+    # argument, so an operator that overrides init() with its own signature keeps working.
+    _input_topics: typing.Sequence[InputTopic] = ()
+    _training_topics: typing.Sequence[InputTopic] = ()
 
     def __new__(cls, *args, **kwargs):
         obj = super(OperatorBase, cls).__new__(cls)
@@ -120,6 +130,14 @@ class OperatorBase:
             logger.error(ex)
         return dt_results, run_results
 
+    def __passes_import_filter(self, topic: str, message) -> bool:
+        # Only messages of an import input that has a resolved filter are looked at;
+        # device and operator topics, and imports without a filter, pass untouched.
+        if not isinstance(message, dict):
+            return True
+        value_filter = import_filter.filter_for_message(topic, message.get("import_id"))
+        return value_filter is None or import_filter.passes(value_filter, message)
+
     def __route(self):
         msg_obj = self.__kafka_consumer.poll(timeout=self.__poll_timeout)
         if msg_obj:
@@ -130,7 +148,10 @@ class OperatorBase:
                 else:
                     logger.error("Kafka Broker does not support timestamps, using now() as substitute")
                     timestamp = datetime.datetime.now(datetime.timezone.utc)
-                dt_results, results = self.__call_run(json.loads(msg_obj.value()), json.loads(msg_obj.value()).get('device_id'), timestamp)
+                message = json.loads(msg_obj.value())
+                if not self.__passes_import_filter(msg_obj.topic(), message):
+                    return
+                dt_results, results = self.__call_run(message, message.get('device_id'), timestamp)
                 i = 0
                 for result in results:
                     result_timestamp = 0
@@ -211,6 +232,25 @@ class OperatorBase:
             clock.set_fixed(clock.parse_time(config.training_end))
         else:
             clock.set_fixed(None)
+        # Before the first training and before consuming, so neither sees an unfiltered import.
+        import_filter.clear()
+        declared = import_filter.declared_import_filters(self)
+        if declared:
+            from .config import DeploymentConfig
+            import_filter.resolve_import_filters(
+                declared, config, DeploymentConfig(), self._input_topics, self._training_topics)
+
+    def set_topics(self, input_topics: typing.Sequence[InputTopic], training_topics: typing.Sequence[InputTopic] = ()):
+        self._input_topics = list(input_topics)
+        self._training_topics = list(training_topics)
+
+    def resolved_import_filters(self) -> typing.List[ResolvedImportFilter]:
+        """
+        One entry per declared import filter, in declaration order, once init() has run:
+        the value, how it was found ("config", "near" or "none" when nothing was set) and,
+        for "near", the distance in km and the coordinates of the chosen place.
+        """
+        return import_filter.resolved()
 
     def get_pipeline_id(self) -> str:
         return self.__pipeline_id
