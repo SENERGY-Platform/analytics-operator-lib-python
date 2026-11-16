@@ -54,6 +54,11 @@ class MLOperator(OperatorBase):
         mlflow.set_tracking_uri(self.config.mlflow_url)
         self.model_id = f"pipeline-{self.get_pipeline_id()}_operator-{self.get_operator_id()}"
         mlflow.set_experiment(self.model_id)
+        # No run is open until a training or __update_model starts one; a
+        # loaded model skips the training, so run() can reach __update_model first.
+        self.__run = None
+        self.__run_id = None
+        self.__mlflow_logger = None
         if self.config.test_end:
             # A data split with a test end on the config: the evaluation phase
             # replaces the deployment's train-or-skip logic entirely. init()
@@ -173,15 +178,28 @@ class MLOperator(OperatorBase):
     def __wrap_training(self):
         self.__start_run()
 
-        with self.__mlflow_logger.trace("ray init"):
-            logger.debug(
-                f"Initializing Ray. This might take a while, even if you see log messages below...")
-            ray.init(address=self.config.ray_url, runtime_env=_runtime_env())
-        with self.__mlflow_logger.trace("train"):
-            model = self.train(self.model, self.__mlflow_logger)
-        ray.shutdown()
+        try:
+            with self.__mlflow_logger.trace("ray init"):
+                logger.debug(
+                    f"Initializing Ray. This might take a while, even if you see log messages below...")
+                ray.init(address=self.config.ray_url, runtime_env=_runtime_env())
+            with self.__mlflow_logger.trace("train"):
+                model = self.train(self.model, self.__mlflow_logger)
+        except BaseException:
+            self.__end_run("FAILED")
+            raise
+        finally:
+            ray.shutdown()
         if model is not None:
             self.__update_model(model)
+        else:
+            # Left open, the run makes the next __start_run fail with
+            # "Run ... is already active".
+            self.__end_run("FINISHED")
+
+    def __end_run(self, status: str):
+        mlflow.end_run(status=status)
+        self.__run = None
 
     def __evaluate(self):
         """
@@ -215,16 +233,11 @@ class MLOperator(OperatorBase):
         self.model = None
         self.__wrap_training()
 
-        # __wrap_training leaves the run open whenever train() returned None
-        # (__update_model, which ends it, never ran); end it here
-        # unconditionally -- mlflow.end_run() is a no-op when nothing is
-        # active, so this is safe either way -- so no active fluent run
-        # survives into the replay. self.__run_id (captured in __start_run,
-        # untouched by __update_model) still names the run just closed;
-        # everything the replay records goes through MlflowClient against
-        # that id from here on, never through the fluent API again.
-        mlflow.end_run()
-        self.__run = None
+        # __wrap_training has ended its run, so no active fluent run survives
+        # into the replay. self.__run_id (captured in __start_run, untouched
+        # since) still names the run just closed; everything the replay
+        # records goes through MlflowClient against that id from here on,
+        # never through the fluent API again.
         self.__mlflow_logger = None
         run_id = self.__run_id
 
@@ -251,7 +264,7 @@ class MLOperator(OperatorBase):
         #
         # Unix milliseconds, because that is the time base MLflow stamps
         # metrics with and the comparison is against those stamps. Read after
-        # end_run() and before the first infer() below, which is what makes it
+        # the training run ended and before the first infer() below, which is what makes it
         # later than every metric the training phase logged and earlier than
         # anything the replay can write. Moving this line in either direction
         # breaks a control that nothing in this repository can see failing.

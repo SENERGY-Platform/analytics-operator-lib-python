@@ -216,11 +216,10 @@ class TestEvaluationMode(unittest.TestCase):
         # need_retraining is deliberately never consulted during the replay.
         self.assertEqual([], operator.need_retraining_calls)
 
-        # __wrap_training leaves the training run open (train() returned
-        # None here, so __update_model never ran); it is closed
-        # unconditionally, through the fluent API one last time, before the
-        # replay -- everything from here on goes through the client instead.
-        mock_mlflow.end_run.assert_called_once_with()
+        # train() returned None, so __wrap_training ends the training run
+        # itself, through the fluent API one last time, before the replay --
+        # everything from here on goes through the client instead.
+        mock_mlflow.end_run.assert_called_once_with(status="FINISHED")
 
         # The record on the run, through MlflowClient against the run id
         # captured before the replay.
