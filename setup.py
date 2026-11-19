@@ -48,8 +48,8 @@ setuptools.setup(
         'confluent_kafka==2.4.0',
         'prometheus-client<1',
         'mlflow-skinny==3.8.1',
-        'ray[data]==2.55.0',
-        'ray[client]==2.55.0',
+        'ray[data]==2.56.0',
+        'ray[client]==2.56.0',
         'psycopg2-binary==2.9.11',
         'requests<3',
         'structlog @ git+https://github.com/SENERGY-Platform/python-structlog.git@0.3.0'
